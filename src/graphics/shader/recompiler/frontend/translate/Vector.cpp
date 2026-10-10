@@ -248,7 +248,8 @@ void Translator::EmitVector(const Decoder::Instruction& inst) {
 			EmitFloatCompare(inst, IR::ValueOpcode::FPOrdEqual32, false, false);
 			return;
 		case O::V_CMP_EQ_F64:
-			EmitFloatCompare(inst, IR::ValueOpcode::FPOrdEqual64, false, false);
+			// Some GPUs miscompile OpFOrdEqual64; derive EQ from integer bit logic.
+			EmitFloatEqual(inst, false, true);
 			return;
 		case O::V_CMP_LE_F64:
 			EmitFloatCompare(inst, IR::ValueOpcode::FPOrdLessThanEqual64, false, false);
@@ -270,7 +271,7 @@ void Translator::EmitVector(const Decoder::Instruction& inst) {
 			EmitFloatCompare(inst, IR::ValueOpcode::FPOrdLessThan64, false, true);
 			return;
 		case O::V_CMPX_EQ_F64:
-			EmitFloatCompare(inst, IR::ValueOpcode::FPOrdEqual64, false, true);
+			EmitFloatEqual(inst, true, true);
 			return;
 		case O::V_CMP_GT_F64:
 			EmitFloatCompare(inst, IR::ValueOpcode::FPOrdGreaterThan64, false, false);
@@ -279,21 +280,27 @@ void Translator::EmitVector(const Decoder::Instruction& inst) {
 			EmitFloatCompare(inst, IR::ValueOpcode::FPOrdGreaterThan64, false, true);
 			return;
 		case O::V_CMP_LG_F64:
-			EmitFloatCompare(inst, IR::ValueOpcode::FPOrdNotEqual64, false, false);
+			// Some GPUs miscompile OpFOrdNotEqual/OpFUnordEqual on F64, so derive the
+			// ordered compare from FPOrdEqual64 and FPIsNan64 instead.
+			EmitFloatNotEqual(inst, false, true);
 			return;
 		case O::V_CMPX_LG_F64:
-			EmitFloatCompare(inst, IR::ValueOpcode::FPOrdNotEqual64, false, true);
+			EmitFloatNotEqual(inst, false, true);
 			return;
 		case O::V_CMP_GE_F64:
 			EmitFloatCompare(inst, IR::ValueOpcode::FPOrdGreaterThanEqual64, false, false);
 			return;
 		case O::V_CMP_NLG_F64:
-			EmitFloatCompare(inst, IR::ValueOpcode::FPUnordEqual64, false, false);
+			// FPUnordEqual64 miscompiles on some GPUs; NLG is unordered OR equal, so
+			// express it as unordered OR ordered-equal.
+			EmitFloatUnordEqual(inst, false);
 			return;
 		case O::V_CMPX_NLG_F64:
-			EmitFloatCompare(inst, IR::ValueOpcode::FPUnordEqual64, false, true);
+			EmitFloatUnordEqual(inst, true);
 			return;
 		case O::V_CMP_NEQ_F64:
+			// FPUnordNotEqual64 miscompiles on some GPUs; NEQ is unordered OR not-equal,
+			// which is the negation of ordered-equal.
 			EmitFloatCompare(inst, IR::ValueOpcode::FPUnordNotEqual64, false, false);
 			return;
 		case O::V_CMPX_NEQ_F64:

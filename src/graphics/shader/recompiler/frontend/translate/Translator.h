@@ -129,6 +129,21 @@ private:
 	                      bool cmpx);
 	void EmitFloatOrderedCompare(const Decoder::Instruction& inst, bool ordered, bool cmpx,
 	                             bool is64 = false);
+	void EmitFloatUnordEqual(const Decoder::Instruction& inst, bool cmpx);
+	void EmitFloatNotEqual(const Decoder::Instruction& inst, bool cmpx, bool is64 = false);
+	void EmitFloatEqual(const Decoder::Instruction& inst, bool cmpx, bool is64 = false);
+
+	// Raw-bit metadata for one F64 operand, judged with integer compares so that
+	// drivers that miscompile OpFOrd*/OpFUnord* (and some, the F64<->U64 bitcast
+	// round-trip) stay out of the path entirely. Keep the operand as two U32 dwords.
+	struct F64OperandBits {
+		IR::U32 low;
+		IR::U32 high;
+		IR::U1  is_nan;
+		IR::U1  is_zero;
+	};
+	[[nodiscard]] F64OperandBits ReadF64OperandBits(const Decoder::Operand& operand);
+	[[nodiscard]] IR::U1 IsFloatNumericEqual64(const F64OperandBits& lhs, const F64OperandBits& rhs);
 	void EmitFloatClassCompare(const Decoder::Instruction& inst, bool cmpx, bool half = false);
 	void V_CVT_F32_UBYTE(const Decoder::Instruction& inst, uint32_t byte_index);
 	void V_CVT_F32_U32(const Decoder::Instruction& inst);

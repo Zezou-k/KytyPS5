@@ -209,6 +209,15 @@ uint32_t EmitCompositeExtractU32x2(EmitterState& state, uint32_t arg0, IR::Value
 	return EmitNative<spv::OpCompositeExtract, IR::Type::U32>(state, arg0, arg1.U32());
 }
 
+// GLSLstd450Fract miscompiles on some GPUs for F64: fract(1+eps) can return
+// 1-eps instead of eps (denormal inputs lose the floor). Lower fract as the
+// explicit x - floor(x), which is also GCN's V_FRACT semantics: Inf-Inf -> NaN,
+// +/-0 stay +/-0 through floor, and NaN propagates through both ops.
+uint32_t EmitFPFract64(EmitterState& state, uint32_t arg0) {
+	const auto floor    = EmitFPFloor64(state, arg0);
+	return Binary(state, spv::OpFSub, TypeF64(state), arg0, floor);
+}
+
 uint32_t EmitPackFloat2x16Rtz(EmitterState& state, uint32_t arg0, uint32_t arg1) {
 	const auto low  = EmitF32ToF16RtzBits(state, arg0);
 	const auto high = Binary(state, spv::OpShiftLeftLogical, TypeU32(state),

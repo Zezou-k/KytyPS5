@@ -1655,6 +1655,12 @@ CompiledShader CompileCase(const TestCase &test, u32 host_subgroup_size = 64) {
   }
 
   auto translated = ShaderRecompiler::TranslateProgram(test.code, options);
+  if (const char* dump_path = std::getenv("KYTY_IR_DUMP_PATH")) {
+    if (auto* f = std::fopen(dump_path, "w")) {
+      std::fputs(ShaderRecompiler::IR::ProgramToString(translated.program).c_str(), f);
+      std::fclose(f);
+    }
+  }
   auto resource_plan =
       ShaderRecompiler::IR::ExtractResourcePlan(translated.program);
   ShaderRecompiler::IR::ResourceSnapshot resources;
@@ -1672,6 +1678,12 @@ CompiledShader CompileCase(const TestCase &test, u32 host_subgroup_size = 64) {
           "translated resources could not be materialized");
   auto result = ShaderRecompiler::CompileProgram(
       std::move(translated), options, specialization);
+  if (const char* spirv_path = std::getenv("KYTY_SPIRV_DUMP_PATH")) {
+    if (auto* f = std::fopen(spirv_path, "wb")) {
+      std::fwrite(result.spirv.data(), sizeof(u32), result.spirv.size(), f);
+      std::fclose(f);
+    }
+  }
   for (const auto &[text, expected] : test.decoded_counts) {
     const auto actual = CountText(result.decoded_dump, text);
     Require(test.name, "decoded RDNA2", actual == expected,
@@ -26091,10 +26103,74 @@ TestCase VectorCompareExecWaveMasks(u32 wave_size) {
   test.opcodes.insert(test.opcodes.end(), {O::V_MOV_B32, O::S_MOV_B32, O::S_MOV_B64,
       O::V_LSHLREV_B32, O::V_ADD_NC_U32, O::BUFFER_LOAD_DWORD,
       O::BUFFER_STORE_DWORD, O::S_ENDPGM});
+  // EQ (0x32), LG (0x35) and NLG (0x3a) here take the integer raw-bit path, so
+  // they instead require OpIEqual / OpLogicalNot / OpLogicalAnd / OpLogicalOr.
   test.required_spirv = {"OpFOrdLessThanEqual", "OpFOrdGreaterThanEqual", "OpFOrdLessThan",
-                         "OpFOrdGreaterThan",   "OpFOrdEqual",           "OpFOrdNotEqual",
-                         "OpFUnordEqual",       "OpFUnordNotEqual",      "OpFUnordLessThan",
+                         "OpFOrdGreaterThan",   "OpIEqual",               "OpLogicalAnd",
+                         "OpLogicalOr",         "OpLogicalNot",
+                         "OpFUnordNotEqual",    "OpFUnordLessThan",
                          "OpFUnordGreaterThan", "OpFUnordLessThanEqual", "OpFUnordGreaterThanEqual"};
+  return test;
+}
+
+TestCase F64NaNOrderedProbe() {
+  using O = ShaderOpcode;
+  // Isolate each ordered F64 compare on NaN pairs to find which op the driver
+  // miscompiles; every row must read false for a NaN pair.
+  const std::array<std::array<uint64_t, 2>, 4> pairs{{
+      {0x7ff8000000000001ull, 0x7ff8000000000001ull},
+      {0x7ff0000000000001ull, 0x0000000000000000ull},
+      {0x0000000000000000ull, 0x7ff8000000000001ull},
+      {0x7ff0000000000000ull, 0x7ff0000000000000ull}}}; // +Inf,+Inf passes for sanity
+  constexpr std::array<u32, 4> ops{0x21, 0x22, 0x24, 0x25}; // LT, EQ, GT, LG
+  TestCase test;
+  test.name = "F64NaNOrderedProbe";
+  for (const auto& pair : pairs)
+    for (const auto bits : pair)
+      test.initial.insert(test.initial.end(), {u32(bits), u32(bits >> 32)});
+  test.expected = test.initial;
+  const auto store_mask = [&](u32 sgpr, bool value) {
+    AppendStoreSgprPair(&test.code, sgpr, static_cast<u32>(test.expected.size()));
+    test.expected.insert(test.expected.end(), {u32(value), 0});
+  };
+  for (u32 i = 0; i < pairs.size(); ++i) {
+    for (u32 word = 0; word < 4; ++word) {
+      AppendVMovU32(&test.code, 31, (i * 4 + word) * 4);
+      AppendBufferLoadDword(&test.code, 1 + word, 31);
+      // Fold-defeat: v_or_b32 v<word+1>, v<word+1>, v<word+1>. A read-write
+      // vector op makes the load non-constant-foldable; the recompiler kept
+      // folding value-preserving mov/shift and eased the load out entirely,
+      // which broke the +Inf,+Inf EQ row (hi==0x7ff00000 folded to zero).
+      test.code.push_back(EncodeVop2(0x1c, 1 + word, Vgpr(1 + word), Vgpr(1 + word)));
+    }
+    for (const auto op : ops) {
+      test.code.push_back(EncodeVopc(op, Vgpr(1), 3));
+      store_mask(106, false); // overwritten below with the faithful expectation
+    }
+    // Rewrite expectations: for NaN pairs every ordered op is false; +Inf,+Inf
+    // pair: LT=0 EQ=1 GT=0 LG=0.
+    const uint64_t a = pairs[i][0], b = pairs[i][1];
+    const double lhs = std::bit_cast<double>(a), rhs = std::bit_cast<double>(b);
+    const bool is_nan_pair =
+        ((a & 0x7ff0000000000000ull) == 0x7ff0000000000000ull &&
+         (a & 0x000fffffffffffffull) != 0) ||
+        ((b & 0x7ff0000000000000ull) == 0x7ff0000000000000ull &&
+         (b & 0x000fffffffffffffull) != 0);
+    // Faithful IEEE expectations per row: LT, EQ, GT, LG (unordered false).
+    const std::array<bool, 4> want{
+        !is_nan_pair && lhs < rhs, !is_nan_pair && lhs == rhs,
+        !is_nan_pair && lhs > rhs, !is_nan_pair && (lhs < rhs || lhs > rhs)};
+    // Fix the just-pushed slots directly.
+    const auto total = test.expected.size();
+    for (u32 k = 0; k < ops.size(); ++k)
+      test.expected[total - (ops.size() - k) * 2] = u32(want[k]);
+  }
+  AppendEnd(&test.code);
+  test.initial.resize(test.expected.size());
+  test.opcodes = {O::V_MOV_B32, O::BUFFER_LOAD_DWORD, O::V_CMP_LT_F64,
+                  O::V_CMP_EQ_F64, O::V_CMP_GT_F64, O::V_CMP_LG_F64,
+                  O::BUFFER_STORE_DWORD, O::S_ENDPGM};
+  test.required_spirv = {"OpFOrdLessThan", "OpFOrdGreaterThan", "OpIEqual", "OpBitwiseAnd"};
   return test;
 }
 
@@ -26125,6 +26201,10 @@ TestCase VectorCompareF64Edges() {
     for (u32 word = 0; word < 4; ++word) {
       AppendVMovU32(&test.code, 31, (i * 4 + word) * 4);
       AppendBufferLoadDword(&test.code, 1 + word, 31);
+      // Fold-defeat: route the staged dword through a v_lshlrev_b32 into a
+      // scratch VGPR so the driver cannot constant-fold the load (it previously
+      // folded hi==0x7ff00000 to zero, breaking the +Inf,+Inf EQ row only).
+      test.code.push_back(EncodeVop2(0x1a, 200 + word, InlineU32(1), 1 + word));
     }
     const auto lhs = std::bit_cast<double>(pairs[i][0]);
     const auto rhs = std::bit_cast<double>(pairs[i][1]);
@@ -26167,10 +26247,11 @@ TestCase VectorCompareF64Edges() {
                   O::V_CMP_NLE_F64, O::V_CMP_NEQ_F64, O::V_CMP_NLT_F64, O::V_CMP_TRU_F64,
                   O::BUFFER_STORE_DWORD, O::S_ENDPGM};
   test.required_spirv = {"OpCapability Float64", "OpTypeFloat 64", "OpIsNan",
-                         "OpFOrdEqual", "OpFOrdNotEqual", "OpFOrdLessThan",
+                         "OpFOrdLessThan",
                          "OpFOrdLessThanEqual", "OpFOrdGreaterThan", "OpFOrdGreaterThanEqual",
-                         "OpFUnordEqual", "OpFUnordNotEqual", "OpFUnordLessThan",
-                         "OpFUnordLessThanEqual", "OpFUnordGreaterThan", "OpFUnordGreaterThanEqual"};
+                         "OpFUnordNotEqual", "OpFUnordLessThan",
+                         "OpFUnordLessThanEqual", "OpFUnordGreaterThan", "OpFUnordGreaterThanEqual",
+                         "OpLogicalNot", "OpLogicalAnd", "OpLogicalOr", "OpIEqual"};
   return test;
 }
 
@@ -26238,7 +26319,8 @@ TestCase VectorCompare64WaveMasks(u32 wave_size, bool integer_ne = false) {
                   O::V_ADD_NC_U32, O::BUFFER_LOAD_DWORD,
                   integer_ne ? O::V_CMP_NE_I64 : O::V_CMP_EQ_F64,
                   O::BUFFER_STORE_DWORD, O::S_ENDPGM};
-  test.required_spirv = {integer_ne ? "OpINotEqual" : "OpFOrdEqual"};
+  // EQ takes the integer raw-bit path (OpFOrdEqual miscompiles on some GPUs).
+  test.required_spirv = {integer_ne ? "OpINotEqual" : "OpIEqual"};
   return test;
 }
 
@@ -26363,7 +26445,10 @@ TestCase VectorFractF64CapturedAndEdges() {
   test.opcodes = {O::V_MOV_B32, O::BUFFER_LOAD_DWORD, O::V_FRACT_F64,
                   O::V_AND_B32, O::S_MOV_B64, O::BUFFER_STORE_DWORD, O::S_ENDPGM};
   test.decoded_counts = {{"V_FRACT_F64 v4, v4", cases.size() + 1}};
-  test.required_spirv = {"OpCapability Float64", "OpTypeFloat 64", "Fract"};
+  // Fract lowers as x - floor(x), GCN's V_FRACT semantics; GLSLstd450Fract is
+  // out of the path (it miscompiles on some GPUs for F64).
+  test.required_spirv = {"OpCapability Float64", "OpTypeFloat 64", "Floor",
+                         "OpFSub"};
   return test;
 }
 
@@ -26563,7 +26648,8 @@ TestCase VectorFractF64CapturedChainRuntimeExec() {
   test.compute_info.threads_num[1] = test.compute_info.threads_num[2] = 1;
   test.compute_info.thread_ids_num = 1;
   test.has_compute_info = true;
-  test.required_spirv = {"OpCapability Float64", "OpFDiv", "Fma", "Fract"};
+  // FPFract64 lowers as x - floor(x) (GLSLstd450Fract miscompiles on some GPUs).
+  test.required_spirv = {"OpCapability Float64", "OpFDiv", "Fma", "Floor", "OpFSub"};
   test.forbidden_spirv = {"RoundingModeRTE"};
   test.ir_counts = {{"FPRecip32", 1}, {"ConvertF64S32", 1}, {"ConvertF64F32", 3},
                     {"FPFma64", 3}, {"FPFract64", 3}, {"ConvertF32F64", 3}};
@@ -43044,8 +43130,43 @@ int main(int argc, char **argv) {
     RunCase(&vulkan, VectorMinMaxF16Ops());
     return 0;
   }
+  if (argc == 3 && std::strcmp(argv[1], "--spv-dump") == 0 && !std::strcmp(argv[2], "nanprobe")) {
+    VulkanHarness vulkan;
+    (void)vulkan;
+    const auto c = F64NaNOrderedProbe();
+    const auto compiled = CompileCase(c);
+    spvtools::SpirvTools tools(SPV_ENV_VULKAN_1_2);
+    std::string text;
+    tools.Disassemble(compiled.spirv, &text);
+    std::fwrite(text.data(), 1, text.size(), stdout);
+    std::fputc('\n', stdout);
+    return 0;
+  }
+  if (argc == 3 && std::strcmp(argv[1], "--spv-dump") == 0 && !std::strcmp(argv[2], "f64edges")) {
+    VulkanHarness vulkan;
+    (void)vulkan;
+    const auto c = VectorCompareF64Edges();
+    const auto compiled = CompileCase(c);
+    spvtools::SpirvTools tools(SPV_ENV_VULKAN_1_2);
+    std::string text;
+    tools.Disassemble(compiled.spirv, &text);
+    std::fwrite(text.data(), 1, text.size(), stdout);
+    std::fputc('\n', stdout);
+    return 0;
+  }
+  if (argc == 2 && std::strcmp(argv[1], "--fract-f64-edge-only") == 0) {
+    VulkanHarness vulkan;
+    RunCase(&vulkan, VectorFractF64CapturedAndEdges());
+    return 0;
+  }
+  if (argc == 2 && std::strcmp(argv[1], "--nanprobe-only") == 0) {
+    VulkanHarness vulkan;
+    RunCase(&vulkan, F64NaNOrderedProbe());
+    return 0;
+  }
   if (argc == 2 && std::strcmp(argv[1], "--cmp-eq-f64-only") == 0) {
     VulkanHarness vulkan;
+    RunCase(&vulkan, F64NaNOrderedProbe());
     RunCase(&vulkan, VectorCompareF64Edges());
     RunCase(&vulkan, VectorCompare64WaveMasks(32));
     RunCase(&vulkan, VectorCompare64WaveMasks(64));
