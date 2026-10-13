@@ -80,6 +80,22 @@ const SymbolRecord* SymbolDatabase::FindByNid(const std::string& nid, SymbolType
 	return nullptr;
 }
 
+const SymbolRecord* SymbolDatabase::FindByNidLib(const std::string& nid,
+                                                  const std::string& library,
+                                                  SymbolType         type) const {
+	auto prefix = nid + "[";
+	auto suffix = fmt::format("[{}]", magic_enum::enum_name(type));
+
+	for (const auto& symbol: m_symbols) {
+		if (symbol.name.starts_with(prefix) && symbol.name.ends_with(suffix) &&
+		    symbol.name.find("[" + library + "_v") != std::string::npos) {
+			return &symbol;
+		}
+	}
+
+	return nullptr;
+}
+
 const SymbolRecord* SymbolDatabase::FindByName(const std::string& name, SymbolType type) const {
 	auto prefix = name + "[";
 	auto suffix = fmt::format("[{}]", magic_enum::enum_name(type));

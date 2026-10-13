@@ -558,6 +558,16 @@ add_kyty_full_emulator_test(kernel_file_system_tests
 	"${KYTY_TESTS_DIR}/KernelFileSystemTests.cpp")
 target_link_libraries(kernel_file_system_tests ZArchive::zarchive)
 
+# Resolves LIB_FUNC registrations against the PLT imports the capture logs recorded,
+# so new unresolved stubs fail ctest instead of shipping to games.
+get_filename_component(KYTY_REPO_ROOT_DIR "${KYTY_SOURCE_DIR}" DIRECTORY)
+cmake_path(SET KYTY_REPO_ROOT_DEFINE "${KYTY_REPO_ROOT_DIR}")
+cmake_path(SET KYTY_REPO_ROOT_DEFINE "${KYTY_REPO_ROOT_DEFINE}" NORMALIZE)
+add_kyty_full_emulator_test(stub_import_coverage_tests
+	"${KYTY_TESTS_DIR}/StubImportCoverageTests.cpp")
+target_compile_definitions(stub_import_coverage_tests
+	PRIVATE KYTY_SOURCE_ROOT="${KYTY_REPO_ROOT_DEFINE}")
+
 add_executable(sync_on_address_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/SyncOnAddressTests.cpp"
 	"${KYTY_SOURCE_DIR}/kernel/syncOnAddress.cpp"
@@ -647,6 +657,7 @@ if(BUILD_TESTING)
 	add_test(NAME ces COMMAND $<TARGET_FILE:ces_tests>)
 	add_test(NAME save_data_dialog COMMAND $<TARGET_FILE:save_data_dialog_tests>)
 	add_test(NAME http_uri_parse COMMAND $<TARGET_FILE:http_uri_parse_tests>)
+	add_test(NAME stub_import_coverage COMMAND $<TARGET_FILE:stub_import_coverage_tests>)
 	add_test(NAME shader_recompiler_compute COMMAND $<TARGET_FILE:shader_recompiler_compute_tests>)
 	add_test(NAME shader_recompiler_alignbyte
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --alignbyte-only)
