@@ -2805,24 +2805,10 @@ LIB_DEFINE(InitPlatform_1_Remoteplay) {
 
 namespace LibWebBrowserDialog {
 
-LIB_VERSION("WebBrowserDialog", 1, "WebBrowserDialog", 1, 1);
+// WebBrowserDialogInitialize ("jqb7HntFQFc") and WebBrowserDialogTerminate ("ocHtyBwHfys")
+// are registered by the full lifecycle implementation in libWebBrowserDialog.cpp.
 
-static int KYTY_SYSV_ABI WebBrowserDialogInitialize() {
-	PRINT_NAME();
-
-	return 0;
-}
-
-static int KYTY_SYSV_ABI WebBrowserDialogTerminate() {
-	PRINT_NAME();
-
-	return 0;
-}
-
-LIB_DEFINE(InitPlatform_1_WebBrowserDialog) {
-	LIB_FUNC("jqb7HntFQFc", LibWebBrowserDialog::WebBrowserDialogInitialize);
-	LIB_FUNC("ocHtyBwHfys", LibWebBrowserDialog::WebBrowserDialogTerminate);
-}
+LIB_DEFINE(InitPlatform_1_WebBrowserDialog) {}
 
 } // namespace LibWebBrowserDialog
 
