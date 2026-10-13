@@ -70,12 +70,17 @@ int KYTY_SYSV_ABI MsgDialogProgressBarSetMsg(int target, const char* msg);
 
 namespace SystemDialog {
 
-enum class Kind { Error, Signin };
+// Browser dialog URL storage; length chosen defensively because the real
+// SceWebBrowserDialogParam layout (and its URL field) is unverified.
+constexpr size_t kBrowserUrlSize = 512;
+
+enum class Kind { Error, Signin, Browser };
 
 struct HostSnapshot {
 	Kind     kind;
 	uint64_t generation;
 	int32_t  error_code;
+	char     url[kBrowserUrlSize];
 };
 
 struct VisualState {
@@ -101,6 +106,24 @@ int KYTY_SYSV_ABI ErrorDialogUpdateStatus();
 int KYTY_SYSV_ABI ErrorDialogGetStatus();
 
 } // namespace ErrorDialog
+
+namespace WebBrowserDialog {
+
+// Same NONE/INITIALIZED/RUNNING/FINISHED lifecycle as the other common dialogs.
+int KYTY_SYSV_ABI Initialize();
+int KYTY_SYSV_ABI Terminate();
+int KYTY_SYSV_ABI Open(const void* param);
+int KYTY_SYSV_ABI Close();
+int KYTY_SYSV_ABI UpdateStatus();
+int KYTY_SYSV_ABI GetStatus();
+int KYTY_SYSV_ABI GetResult(void* result);
+
+// Cookie maintenance without a persistent cookie jar: logged, state-gated, no real
+// cookie storage yet.
+int KYTY_SYSV_ABI SetCookie(void* param);
+int KYTY_SYSV_ABI ResetCookie();
+
+} // namespace WebBrowserDialog
 
 } // namespace Libs::Dialog
 

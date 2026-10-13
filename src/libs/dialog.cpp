@@ -5,6 +5,7 @@
 #include "common/stringUtils.h"
 #include "libs/errno.h"
 #include "libs/libs.h"
+#include "libs/systemService.h"
 
 #include <atomic>
 #include <cstdio>
@@ -27,6 +28,16 @@ struct DialogState {
 std::mutex  g_dialog_mutex;
 DialogState g_error;
 DialogState g_signin;
+DialogState g_web;
+char        g_web_url[SystemDialog::kBrowserUrlSize] {};
+
+// NOTE(unverified): WebBrowserClosed = 0x10000012 comes from shadPS4's reconstructed
+// PS4-oriented system_service.h (https://github.com/shadps4-emu/shadPS4, src/core/
+// libraries/system/systemservice.h); no leaked PS5 SDK header was readable to
+// confirm the value for PS5. Posted without payload on purpose: the event data
+// layout is likewise unverified.
+constexpr int EVENT_WEB_BROWSER_CLOSED = 0x10000012;
+
 uint64_t    g_dialog_generation        = 0;
 uint64_t    g_dialog_revision          = 0;
 int32_t     g_error_code               = 0;
@@ -49,18 +60,41 @@ void SetDialogStatus(DialogState& dialog, int status, std::unique_lock<std::mute
 	}
 }
 
+// Finishes a RUNNING browser session and notifies the game via
+// sceSystemServiceReceiveEvent so titles waiting on the event queue learn that the
+// browser went away and the app is active again.
+void CloseWebBrowserRunning(std::unique_lock<std::mutex>& lock) {
+	SetDialogStatus(g_web, DIALOG_STATUS_FINISHED, lock);
+	SystemService::PostEvent(EVENT_WEB_BROWSER_CLOSED, nullptr, 0);
+}
+
+
 } // namespace
 
 namespace SystemDialog {
 
+bool HostSnapshotForBrowser(HostSnapshot* snapshot) {
+	if (g_web.status != DIALOG_STATUS_RUNNING) {
+		return false;
+	}
+	snapshot->kind       = Kind::Browser;
+	snapshot->generation = g_web.generation;
+	snapshot->error_code = 0;
+	std::memcpy(snapshot->url, g_web_url, sizeof(snapshot->url));
+	return true;
+}
+
 bool GetHostSnapshot(HostSnapshot* snapshot) {
 	std::scoped_lock lock(g_dialog_mutex);
 	if (g_signin.status == DIALOG_STATUS_RUNNING) {
-		*snapshot = {Kind::Signin, g_signin.generation, 0};
+		*snapshot = {Kind::Signin, g_signin.generation, 0, {}};
+		return true;
+	}
+	if (HostSnapshotForBrowser(snapshot)) {
 		return true;
 	}
 	if (g_error.status == DIALOG_STATUS_RUNNING) {
-		*snapshot = {Kind::Error, g_error.generation, g_error_code};
+		*snapshot = {Kind::Error, g_error.generation, g_error_code, {}};
 		return true;
 	}
 	return false;
@@ -69,7 +103,9 @@ bool GetHostSnapshot(HostSnapshot* snapshot) {
 VisualState GetVisualState() noexcept {
 	std::scoped_lock lock(g_dialog_mutex);
 	const bool       signin = g_signin.status == DIALOG_STATUS_RUNNING;
-	return {g_error.status == DIALOG_STATUS_RUNNING || signin, signin, g_dialog_revision};
+	const bool       web    = g_web.status == DIALOG_STATUS_RUNNING;
+	return {g_error.status == DIALOG_STATUS_RUNNING || signin || web, signin || web,
+	        g_dialog_revision};
 }
 
 void SetVisibilityCallback(void (*callback)()) {
@@ -79,11 +115,22 @@ void SetVisibilityCallback(void (*callback)()) {
 
 bool HostClose(uint64_t generation) {
 	std::unique_lock lock(g_dialog_mutex);
-	auto&            dialog = g_signin.status == DIALOG_STATUS_RUNNING ? g_signin : g_error;
-	if (dialog.status != DIALOG_STATUS_RUNNING || generation != dialog.generation) {
+	DialogState*     dialog = nullptr;
+	if (g_signin.status == DIALOG_STATUS_RUNNING && g_signin.generation == generation) {
+		dialog = &g_signin;
+	} else if (g_web.status == DIALOG_STATUS_RUNNING && g_web.generation == generation) {
+		dialog = &g_web;
+	} else if (g_error.status == DIALOG_STATUS_RUNNING && g_error.generation == generation) {
+		dialog = &g_error;
+	}
+	if (dialog == nullptr || dialog->status != DIALOG_STATUS_RUNNING) {
 		return false;
 	}
-	SetDialogStatus(dialog, DIALOG_STATUS_FINISHED, lock);
+	if (dialog == &g_web) {
+		CloseWebBrowserRunning(lock);
+	} else {
+		SetDialogStatus(*dialog, DIALOG_STATUS_FINISHED, lock);
+	}
 	return true;
 }
 
@@ -826,5 +873,170 @@ int KYTY_SYSV_ABI ErrorDialogGetStatus() {
 }
 
 } // namespace ErrorDialog
+
+namespace WebBrowserDialog {
+
+LIB_NAME("WebBrowserDialog", "WebBrowserDialog");
+
+// Same state progression rules the other common dialogs use.
+constexpr int WEB_STATUS_NONE        = 0;
+constexpr int WEB_STATUS_INITIALIZED = 1;
+constexpr int WEB_STATUS_RUNNING     = 2;
+constexpr int WEB_STATUS_FINISHED    = 3;
+
+constexpr int WEB_RESULT_USER_CANCELED = 1;
+
+// NOTE(unverified): the numeric error values reuse the 0x8135xxxx CommonDialog family
+// pattern of Kyty's SigninDialog. The real SceWebBrowserDialogError codes were never
+// confirmed from an SDK header; games normally branch only on zero/non-zero.
+constexpr int WEB_ERROR_NOT_INITIALIZED     = static_cast<int>(0x81350041u);
+constexpr int WEB_ERROR_ALREADY_INITIALIZED = static_cast<int>(0x81350042u);
+constexpr int WEB_ERROR_PARAM_INVALID       = static_cast<int>(0x81350043u);
+constexpr int WEB_ERROR_INVALID_STATE       = static_cast<int>(0x81350045u);
+
+int KYTY_SYSV_ABI Initialize() {
+	PRINT_NAME();
+
+	std::scoped_lock lock(g_dialog_mutex);
+	if (g_web.status != WEB_STATUS_NONE) {
+		return WEB_ERROR_ALREADY_INITIALIZED;
+	}
+
+	g_web.status = WEB_STATUS_INITIALIZED;
+
+	return OK;
+}
+
+int KYTY_SYSV_ABI Terminate() {
+	PRINT_NAME();
+
+	std::unique_lock lock(g_dialog_mutex);
+	if (g_web.status == WEB_STATUS_NONE) {
+		return WEB_ERROR_NOT_INITIALIZED;
+	}
+	if (g_web.status == WEB_STATUS_RUNNING) {
+		CloseWebBrowserRunning(lock);
+	} else {
+		g_web.status = WEB_STATUS_NONE;
+	}
+
+	return OK;
+}
+
+int KYTY_SYSV_ABI Open(const void* param) {
+	PRINT_NAME();
+
+	{
+		std::scoped_lock lock(g_dialog_mutex);
+		if (g_web.status == WEB_STATUS_NONE) {
+			return WEB_ERROR_NOT_INITIALIZED;
+		}
+		if (g_web.status != WEB_STATUS_INITIALIZED && g_web.status != WEB_STATUS_FINISHED) {
+			return WEB_ERROR_INVALID_STATE;
+		}
+	}
+
+	// The guest param is SceWebBrowserDialogParam whose layout is unverified, so no hard
+	// validation: probe only the leading size field for the log, and hand the overlay an
+	// editable address bar instead of a pre-extracted URL.
+	uint32_t param_size = 0;
+	if (param != nullptr) {
+		std::memcpy(&param_size, param, sizeof(param_size));
+	}
+	LOGF("\t param = 0x%016" PRIx64 ", size = %u\n", reinterpret_cast<uint64_t>(param),
+	     static_cast<uint32_t>(param_size));
+
+	std::unique_lock lock(g_dialog_mutex);
+	if (g_web_url[0] == '\0') {
+		// NOTE(unverified): the real SceWebBrowserDialogParam layout (and its URL field)
+		// is unverified, so the overlay address bar starts at a neutral landing page the
+		// user can edit instead of a URL guessed from the guest param.
+		std::memcpy(g_web_url, "https://www.playstation.com/\0", 28);
+	}
+	SetDialogStatus(g_web, WEB_STATUS_RUNNING, lock);
+
+	return OK;
+}
+
+int KYTY_SYSV_ABI Close() {
+	PRINT_NAME();
+
+	std::unique_lock lock(g_dialog_mutex);
+	if (g_web.status == WEB_STATUS_NONE) {
+		return WEB_ERROR_NOT_INITIALIZED;
+	}
+	if (g_web.status != WEB_STATUS_RUNNING) {
+		return WEB_ERROR_INVALID_STATE;
+	}
+
+	CloseWebBrowserRunning(lock);
+
+	return OK;
+}
+
+int KYTY_SYSV_ABI UpdateStatus() {
+	PRINT_NAME();
+
+	std::scoped_lock lock(g_dialog_mutex);
+	// With the overlay browser panel available the dialog stays RUNNING until the user
+	// (or the game) closes it; no auto-finish stub behavior.
+	return g_web.status;
+}
+
+int KYTY_SYSV_ABI GetStatus() {
+	PRINT_NAME();
+
+	std::scoped_lock lock(g_dialog_mutex);
+	return g_web.status;
+}
+
+int KYTY_SYSV_ABI GetResult(void* result) {
+	PRINT_NAME();
+
+	std::scoped_lock lock(g_dialog_mutex);
+	if (g_web.status == WEB_STATUS_NONE) {
+		return WEB_ERROR_NOT_INITIALIZED;
+	}
+	if (g_web.status != WEB_STATUS_FINISHED) {
+		return WEB_ERROR_INVALID_STATE;
+	}
+	if (result == nullptr) {
+		return WEB_ERROR_PARAM_INVALID;
+	}		auto* r = static_cast<int32_t*>(result);
+	r[0]    = WEB_RESULT_USER_CANCELED;
+	r[1]    = 0;
+	r[2]    = 0;
+	r[3]    = 0;
+
+	return OK;
+}
+
+// Cookie maintenance without a persistent cookie jar: logged, gated on the dialog
+// lifecycle, no real cookie storage yet.
+int KYTY_SYSV_ABI SetCookie(void* param) {
+	PRINT_NAME();
+	LOGF("\t param = 0x%016" PRIx64 " (no persistent cookie jar, ignoring)\n",
+	     reinterpret_cast<uint64_t>(param));
+
+	std::scoped_lock lock(g_dialog_mutex);
+	if (g_web.status == WEB_STATUS_NONE) {
+		return WEB_ERROR_NOT_INITIALIZED;
+	}
+
+	return OK;
+}
+
+int KYTY_SYSV_ABI ResetCookie() {
+	PRINT_NAME();
+
+	std::scoped_lock lock(g_dialog_mutex);
+	if (g_web.status == WEB_STATUS_NONE) {
+		return WEB_ERROR_NOT_INITIALIZED;
+	}
+
+	return OK;
+}
+
+} // namespace WebBrowserDialog
 
 } // namespace Libs::Dialog
