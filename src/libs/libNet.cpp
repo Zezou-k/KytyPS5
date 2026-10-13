@@ -1657,8 +1657,83 @@ static int KYTY_SYSV_ABI NpSessionSignalingInitialize(void* param) {
 	return 0;
 }
 
+// Guest-verified NIDs Hollow Knight Silksong's PSN.prx plugin imports. Names come
+// from the PS5 3.20 generated stub table (https://github.com/DNNDHH/PS5-3.20_Libs,
+// libSceNpSessionSignaling.c); Kyty has no signaling transport, so every call logs
+// and takes the same offline path as NpSessionSignalingInitialize. Guest signatures
+// are unverified, so emulator-side functions take no parameters and never write
+// presumed-out parameters; callers that zero their own structs observe a clean,
+// offline-neutral state.
+static int KYTY_SYSV_ABI NpSessionSignalingActivateUser() {
+	PRINT_NAME();
+	LOGF("\t no signaling transport, accepted offline\n");
+	return 0;
+}
+
+static int KYTY_SYSV_ABI NpSessionSignalingTerminate() {
+	PRINT_NAME();
+	LOGF("\t no signaling transport\n");
+	return 0;
+}
+
+static int KYTY_SYSV_ABI NpSessionSignalingGetLocalNetInfo() {
+	PRINT_NAME();
+	LOGF("\t no net info available offline (no output written)\n");
+	return 0;
+}
+
+static int KYTY_SYSV_ABI NpSessionSignalingDestroyContext() {
+	PRINT_NAME();
+	return 0;
+}
+
+static int KYTY_SYSV_ABI NpSessionSignalingCreateContext2() {
+	PRINT_NAME();
+	LOGF("\t context creation accepted offline\n");
+	return 0;
+}
+
+static int KYTY_SYSV_ABI NpSessionSignalingDeactivate() {
+	PRINT_NAME();
+	return 0;
+}
+
+static int KYTY_SYSV_ABI NpSessionSignalingGetConnectionStatus() {
+	PRINT_NAME();
+	LOGF("\t no connection available offline (no output written)\n");
+	return 0;
+}
+
+static int KYTY_SYSV_ABI NpSessionSignalingActivateSession() {
+	PRINT_NAME();
+	LOGF("\t no session peers offline\n");
+	return 0;
+}
+
+static int KYTY_SYSV_ABI NpSessionSignalingRequestPrepare() {
+	PRINT_NAME();
+	LOGF("\t prepare accepted offline\n");
+	return 0;
+}
+
+static int KYTY_SYSV_ABI NpSessionSignalingGetConnectionInfo() {
+	PRINT_NAME();
+	LOGF("\t no connection info available offline (no output written)\n");
+	return 0;
+}
+
 LIB_DEFINE(InitNet_1_NpSessionSignaling) {
 	LIB_FUNC("ysmw6J-P8Ak", NpSessionSignalingInitialize);
+	LIB_FUNC("9r7dM3puxMk", NpSessionSignalingActivateUser);
+	LIB_FUNC("CqJuNXo5yiM", NpSessionSignalingTerminate);
+	LIB_FUNC("OTilStjd9L8", NpSessionSignalingGetLocalNetInfo);
+	LIB_FUNC("Z9Q9LzQDXf0", NpSessionSignalingDestroyContext);
+	LIB_FUNC("aBuX0PX-T7I", NpSessionSignalingCreateContext2);
+	LIB_FUNC("cQkBH-pXhF0", NpSessionSignalingDeactivate);
+	LIB_FUNC("n1fn2KFeLDA", NpSessionSignalingGetConnectionStatus);
+	LIB_FUNC("r4XacqHvkn4", NpSessionSignalingActivateSession);
+	LIB_FUNC("r8mVMwlafF8", NpSessionSignalingRequestPrepare);
+	LIB_FUNC("yJw2m6UWDYU", NpSessionSignalingGetConnectionInfo);
 }
 
 } // namespace LibNpSessionSignaling
@@ -1798,6 +1873,81 @@ static int KYTY_SYSV_ABI NpEntitlementAccessGetEntitlementKey(
 	return NP_ENTITLEMENT_ACCESS_ERROR_NO_ENTITLEMENT;
 }
 
+// Guest-verified NIDs Hollow Knight Silksong's PSN.prx plugin imports. Names come
+// from the PS5 3.20 generated stub table (https://github.com/DNNDHH/PS5-3.20_Libs,
+// libSceNpEntitlementAccess.c). Offline path matches the block's own
+// GetEntitlementKey precedent: request/poll always complete with
+// ERROR_NO_ENTITLEMENT because there is no PSN backend; lifecycle acks OK. Guest
+// signatures are unverified, so these take no parameters and never write presumed
+// out-parameters.
+static int KYTY_SYSV_ABI EntitlementOfflineNoEntitlement() {
+	PRINT_NAME();
+	LOGF("\t no PSN backend, reporting no entitlement\n");
+	return NP_ENTITLEMENT_ACCESS_ERROR_NO_ENTITLEMENT;
+}
+
+static int KYTY_SYSV_ABI EntitlementOfflineAck() {
+	PRINT_NAME();
+	return 0;
+}
+
+static int KYTY_SYSV_ABI NpEntitlementAccessPollConsumeEntitlement() {
+	return EntitlementOfflineNoEntitlement();
+}
+
+static int KYTY_SYSV_ABI NpEntitlementAccessRequestConsumeServiceEntitlement() {
+	return EntitlementOfflineNoEntitlement();
+}
+
+static int KYTY_SYSV_ABI NpEntitlementAccessAbortRequest() {
+	return EntitlementOfflineAck();
+}
+
+static int KYTY_SYSV_ABI NpEntitlementAccessGenerateTransactionId() {
+	// Transaction ids only matter to a PSN backend; offline they are unused.
+	return EntitlementOfflineAck();
+}
+
+static int KYTY_SYSV_ABI NpEntitlementAccessPollUnifiedEntitlementInfo() {
+	return EntitlementOfflineNoEntitlement();
+}
+
+static int KYTY_SYSV_ABI NpEntitlementAccessRequestServiceEntitlementInfo() {
+	return EntitlementOfflineNoEntitlement();
+}
+
+static int KYTY_SYSV_ABI NpEntitlementAccessPollServiceEntitlementInfo() {
+	return EntitlementOfflineNoEntitlement();
+}
+
+static int KYTY_SYSV_ABI NpEntitlementAccessDeleteRequest() {
+	return EntitlementOfflineAck();
+}
+
+static int KYTY_SYSV_ABI NpEntitlementAccessPollServiceEntitlementInfoList() {
+	return EntitlementOfflineNoEntitlement();
+}
+
+static int KYTY_SYSV_ABI NpEntitlementAccessRequestServiceEntitlementInfoList() {
+	return EntitlementOfflineNoEntitlement();
+}
+
+static int KYTY_SYSV_ABI NpEntitlementAccessRequestConsumeUnifiedEntitlement() {
+	return EntitlementOfflineNoEntitlement();
+}
+
+static int KYTY_SYSV_ABI NpEntitlementAccessRequestUnifiedEntitlementInfo() {
+	return EntitlementOfflineNoEntitlement();
+}
+
+static int KYTY_SYSV_ABI NpEntitlementAccessPollUnifiedEntitlementInfoList() {
+	return EntitlementOfflineNoEntitlement();
+}
+
+static int KYTY_SYSV_ABI NpEntitlementAccessRequestUnifiedEntitlementInfoList() {
+	return EntitlementOfflineNoEntitlement();
+}
+
 LIB_DEFINE(InitNet_1_NpEntitlementAccess) {
 	LIB_FUNC("jO8DM8oyego", LibNpEntitlementAccess::NpEntitlementAccessInitialize);
 	LIB_FUNC("lPDO62PpJIA", LibNpEntitlementAccess::NpEntitlementAccessGetSkuFlag);
@@ -1805,6 +1955,21 @@ LIB_DEFINE(InitNet_1_NpEntitlementAccess) {
 	         LibNpEntitlementAccess::NpEntitlementAccessGetAddcontEntitlementInfoList);
 	LIB_FUNC("xddD23+8TfQ", LibNpEntitlementAccess::NpEntitlementAccessGetAddcontEntitlementInfo);
 	LIB_FUNC("5LiMEPuW0DQ", LibNpEntitlementAccess::NpEntitlementAccessGetEntitlementKey);
+	// The plugin's request/poll surface, all offline-neutral.
+	LIB_FUNC("69u+XqsoNd0", NpEntitlementAccessPollConsumeEntitlement);
+	LIB_FUNC("Aqae0TjLvQU", NpEntitlementAccessRequestConsumeServiceEntitlement);
+	LIB_FUNC("HFcQl9TMcFQ", NpEntitlementAccessAbortRequest);
+	LIB_FUNC("IQtb-TaIjSM", NpEntitlementAccessGenerateTransactionId);
+	LIB_FUNC("M4XlLFnzQaQ", NpEntitlementAccessPollUnifiedEntitlementInfo);
+	LIB_FUNC("M8icY9OwkKs", NpEntitlementAccessRequestServiceEntitlementInfo);
+	LIB_FUNC("ShGBFuoSSsQ", NpEntitlementAccessPollServiceEntitlementInfo);
+	LIB_FUNC("Z0eQj8m7XA8", NpEntitlementAccessDeleteRequest);
+	LIB_FUNC("aFv8qms6XTM", NpEntitlementAccessPollServiceEntitlementInfoList);
+	LIB_FUNC("brbRxzr7qyI", NpEntitlementAccessRequestServiceEntitlementInfoList);
+	LIB_FUNC("eOxGbG3sPb0", NpEntitlementAccessRequestConsumeUnifiedEntitlement);
+	LIB_FUNC("jautSRs4OdQ", NpEntitlementAccessRequestUnifiedEntitlementInfo);
+	LIB_FUNC("nAEqawEZG5s", NpEntitlementAccessPollUnifiedEntitlementInfoList);
+	LIB_FUNC("uCZf2L27th8", NpEntitlementAccessRequestUnifiedEntitlementInfoList);
 }
 
 } // namespace LibNpEntitlementAccess
