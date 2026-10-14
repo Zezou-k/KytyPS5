@@ -125,7 +125,10 @@ void MainDialogPrivate::Setup(MainDialog* main_dialog) {
 	m_ui->check_updates_link->setVisible(UpdateChecker::IsSupported());
 	m_ui->check_updates_on_startup->setVisible(UpdateChecker::IsSupported());
 
-	main_dialog->setWindowFlags(Qt::Dialog /*| Qt::MSWindowsFixedSizeDialogHint*/);
+	// Present the launcher like the PS5 home screen: an app-sized dark shell.
+	// Fullscreen is opt-in through global settings rather than forced.
+	main_dialog->setWindowTitle(tr("KytyPS5"));
+	main_dialog->setWindowFlags(Qt::Window);
 
 	connect(main_dialog, &MainDialog::Start, this, &MainDialogPrivate::FindInterpreter,
 	        Qt::QueuedConnection);

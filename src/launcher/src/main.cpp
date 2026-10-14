@@ -5,6 +5,7 @@
 #include <QApplication>
 #include <QFile>
 #include <QSettings>
+#include <QShowEvent>
 #include <QTimer>
 
 int main(int argc, char* argv[]) {
@@ -34,7 +35,7 @@ int main(int argc, char* argv[]) {
 			splash->close();
 			splash->deleteLater();
 		}
-		w.show();
+		w.showMaximized();
 		w.raise();
 		w.activateWindow();
 	});
@@ -42,7 +43,7 @@ int main(int argc, char* argv[]) {
 		splash->deleteLater();
 		splash = nullptr;
 		QTimer::singleShot(0, &a, [&w] {
-			w.show();
+			w.showMaximized();
 			w.raise();
 			w.activateWindow();
 		});
