@@ -156,9 +156,7 @@ uint32_t EmitConvertU8U32(EmitterState& state, uint32_t arg0) {
 }
 
 uint32_t EmitConvertF16F32(EmitterState& state, uint32_t arg0) {
-	const auto pair = state.builder.AllocateId();
-	state.builder.AddFunction(spv::OpCompositeConstruct, TypeF32Vector(state, 2), pair, arg0,
-	                          ConstantF32(state, 0));
+	const auto pair = EmitCompositeConstructF32x2(state, arg0, ConstantF32Value(state, 0.0f));
 	return EmitPackHalf2x16(state, pair);
 }
 
@@ -216,6 +214,15 @@ uint32_t EmitCompositeExtractU32x2(EmitterState& state, uint32_t arg0, IR::Value
 uint32_t EmitFPFract64(EmitterState& state, uint32_t arg0) {
 	const auto floor    = EmitFPFloor64(state, arg0);
 	return Binary(state, spv::OpFSub, TypeF64(state), arg0, floor);
+}
+
+// GLSLstd450Fract miscompiles on some GPUs (identical for F64 and F32: tiny
+// negative inputs lose the floor, fract(1+eps) can return 1-eps). Lower fract as
+// the explicit x - floor(x), which is also GCN's V_FRACT semantics: Inf-Inf -> NaN,
+// +/-0 stay +/-0 through floor, and NaN propagates through both ops.
+uint32_t EmitFPFract32(EmitterState& state, uint32_t arg0) {
+	const auto floor    = EmitFPFloor32(state, arg0);
+	return Binary(state, spv::OpFSub, TypeF32(state), arg0, floor);
 }
 
 uint32_t EmitPackFloat2x16Rtz(EmitterState& state, uint32_t arg0, uint32_t arg1) {

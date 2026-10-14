@@ -24581,7 +24581,10 @@ TestCase VectorFractF16CapturedAndEdges() {
                   O::V_AND_B32, O::BUFFER_STORE_DWORD, O::S_ENDPGM};
   test.decoded_counts = {{"V_FRACT_F16 v9, v7", inputs.size()}};
   test.ir_counts = {{" = FPFract32 ", inputs.size()}};
-  test.required_spirv = {" Fract ", " PackHalf2x16 ", " UnpackHalf2x16 "};
+  // FPFract32 lowers as x - floor(x); GLSLstd450Fract is out of the path (same
+  // Waldo miscompile as the F64 one: tiny negative inputs lose the floor).
+  // Half-writeback is the bitwise RNE pack: OpShiftLeft_logical to join lanes.
+  test.required_spirv = {"Floor", "OpFSub", "OpShiftLeftLogical", " UnpackHalf2x16 "};
   test.forbidden_spirv = {"OpCapability Float16"};
   return test;
 }
@@ -24624,7 +24627,8 @@ TestCase VectorFractF16Modifiers() {
                  O::BUFFER_STORE_DWORD, O::S_ENDPGM}};
   test.decoded_counts = {{"V_FRACT_F16", 10}};
   test.ir_counts = {{" = FPFract32 ", 10}};
-  test.required_spirv = {" Fract ", " PackHalf2x16 "};
+  // FPFract32 lowers as x - floor(x); see VectorFractF16CapturedAndEdges.
+  test.required_spirv = {"Floor", "OpFSub", "OpShiftLeftLogical"};
   return test;
 }
 
@@ -24662,7 +24666,7 @@ TestCase VectorCosF16CapturedSdwaAndEdges() {
                           "v4.sdwa(sel=5,sext=0)",
                           1}};
   test.ir_counts = {{" = FPCos ", 6}};
-  test.required_spirv = {" Fract ", " Cos ", " PackHalf2x16 "};
+  test.required_spirv = {"OpFSub", " Cos ", "OpShiftLeftLogical"};
   test.forbidden_spirv = {"OpCapability Float16"};
   return test;
 }
@@ -24708,7 +24712,7 @@ TestCase VectorSinF16SdwaAndEdges() {
                           "v4.sdwa(sel=5,sext=0)",
                           1}};
   test.ir_counts = {{" = FPSin ", 9}};
-  test.required_spirv = {" Fract ", " Sin ", " PackHalf2x16 "};
+  test.required_spirv = {"OpFSub", " Sin ", "OpShiftLeftLogical"};
   test.forbidden_spirv = {"OpCapability Float16"};
   return test;
 }

@@ -246,4 +246,111 @@ uint32_t EmitF16BitsToF32(EmitterState& state, uint32_t bits) {
 	return ret;
 }
 
+// GLSLstd450PackHalf2x16 misrounds on some GPUs: the low lane (and only the low
+// lane on the observed driver) truncates F32->F16 instead of round-to-nearest-
+// even, breaking the half-precision 1-ulp edge cases. Lower the pack to the
+// bitwise RTZ conversion (already exact) plus a mid-round increment. The width
+// of the dropped mantissa region depends on the input exponent band, so the
+// increment decision is computed per band:
+//   exp 113..142 : normal half output; 13-bit dropped region, tie at 0x1000.
+//   exp 103..112 : subnormal half output; shift width 126-exp, tie at 1<<shift.
+//   exp     102  : rounds to 0x0001 unless the input is exactly 2^-25 (tie -> zero).
+//   exp    >=143 : every finite input sits above the 65520 Inf tie; +1 turns the
+//                  saturated 0x7bff into 0x7c00 (Inf), the architectural result.
+//   exp    ==255 : Inf/NaN keep their RTZ bit pattern (no payload drift).
+// An incremented half mantissa carries as exponents do (0x7bff+1 -> 0x7c00,
+// subnormal 0x3ff+1 -> 0x0400 wraps into the smallest normal), which is IEEE
+// RNE into the rounding-up direction. Both packed lanes use the same math.
+uint32_t EmitF32ToF16RneBits(EmitterState& state, uint32_t f32) {
+	const auto rtz_bits = EmitF32ToF16RtzBits(state, f32);
+	const auto raw      = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpBitcast, TypeU32(state), raw, f32);
+	const auto mant     = EmitAndConstant(state, raw, 0x007fffffu);
+	const auto exponent = EmitAndConstant(state, EmitShiftRightConstant(state, raw, 23), 0xffu);
+
+	// Packed half rounded away from zero in every band; its low bit doubles as
+	// the kept-LSB test for both the normal and the subnormal bands.
+	const auto kept_lsb =
+	    EmitCompareU32Constant(state, spv::OpINotEqual, EmitAndConstant(state, rtz_bits, 1u), 0u);
+
+	// Normal band: dropped 13-bit region, fixed tie at halfway.
+	const auto dropped    = EmitAndConstant(state, mant, 0x00001fffu);
+	const auto tie        = EmitCompareU32Constant(state, spv::OpIEqual, dropped, 0x1000u);
+	const auto above_half = EmitCompareU32Constant(state, spv::OpUGreaterThan, dropped, 0x1000u);
+	const auto up_normal  = EmitLogicalOrBool(state, above_half,
+	                                          EmitLogicalAndBool(state, tie, kept_lsb));
+
+	// Subnormal-output band: the conversion shifts by 126-exp (14..23 inside the
+	// band), so the dropped region is mant & (2^shift - 1) and the tie sits at
+	// 2^shift / 2. Keep the shift in range even outside the band (14) so the
+	// SPIR-V shift ops never see an undefined operand count.
+	const auto exp_le_112 =
+	    EmitCompareU32Constant(state, spv::OpULessThanEqual, exponent, 112);
+	const auto exp_lt_103 = EmitCompareU32Constant(state, spv::OpULessThan, exponent, 103);
+	const auto raw_sub_shift = EmitSubConstantMinusU32(state, 126, exponent);
+	const auto sub_shift =
+	    EmitSelectValueU32(state, exp_le_112, raw_sub_shift, ConstantU32(state, 14));
+	const auto step = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpShiftLeftLogical, TypeU32(state), step,
+	                          ConstantU32(state, 1), sub_shift);
+	const auto mask = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpISub, TypeU32(state), mask, step, ConstantU32(state, 1));
+	const auto dropped_sub = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpBitwiseAnd, TypeU32(state), dropped_sub, mant, mask);
+	const auto halfway = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpShiftRightLogical, TypeU32(state), halfway, step,
+	                          ConstantU32(state, 1));
+	const auto sub_above = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpUGreaterThan, TypeBool(state), sub_above, dropped_sub,
+	                          halfway);
+	const auto sub_tie = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpIEqual, TypeBool(state), sub_tie, dropped_sub, halfway);
+	const auto up_subnormal =
+	    EmitLogicalOrBool(state, sub_above, EmitLogicalAndBool(state, sub_tie, kept_lsb));
+
+	// Band predicates and the special exponent cases.
+	const auto exp_ge_143 =
+	    EmitCompareU32Constant(state, spv::OpUGreaterThanEqual, exponent, 143);
+	const auto exp_eq_255 = EmitCompareU32Constant(state, spv::OpIEqual, exponent, 255);
+	const auto exp_eq_102 = EmitCompareU32Constant(state, spv::OpIEqual, exponent, 102);
+	const auto mant_not_zero =
+	    EmitCompareU32Constant(state, spv::OpINotEqual, mant, 0);
+	const auto band_normal = EmitLogicalAndBool(state, EmitLogicalNotBool(state, exp_le_112),
+	                                            EmitLogicalNotBool(state, exp_ge_143));
+	const auto band_sub    = EmitLogicalAndBool(state, exp_le_112,
+	                                            EmitLogicalNotBool(state, exp_lt_103));
+	const auto over_cond   = EmitLogicalAndBool(state, exp_ge_143,
+	                                            EmitLogicalNotBool(state, exp_eq_255));
+	const auto up_small    = EmitLogicalAndBool(state, exp_eq_102, mant_not_zero);
+
+	// Combine: exp==255 -> no increment; overflow -> always; normal band ->
+	// 13-bit rule; subnormal band -> shift-width rule; exp==102 -> mant!=0.
+	const auto one  = ConstantU32(state, 1);
+	const auto zero = ConstantU32(state, 0);
+	const auto as_num =
+	    [](EmitterState& st, uint32_t cond) { return EmitSelectValueU32(st, cond, ConstantU32(st, 1), ConstantU32(st, 0)); };
+	const auto sel_102   = as_num(state, up_small);
+	const auto sel_small = EmitSelectValueU32(state, band_sub, as_num(state, up_subnormal), sel_102);
+	const auto sel_normal =
+	    EmitSelectValueU32(state, band_normal, as_num(state, up_normal), sel_small);
+	const auto incr_num = EmitSelectValueU32(state, over_cond, one, sel_normal);
+
+	const auto do_add = EmitCompareU32Constant(state, spv::OpINotEqual, incr_num, 0);
+	return EmitSelectValueU32(
+	    state, do_add, EmitAddU32(state, rtz_bits, ConstantU32(state, 1)), rtz_bits);
+}
+
+uint32_t EmitPackHalf2x16(EmitterState& state, uint32_t pair) {
+	const auto low  = state.builder.AllocateId();
+	const auto high = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpCompositeExtract, TypeF32(state), low, pair, 0);
+	state.builder.AddFunction(spv::OpCompositeExtract, TypeF32(state), high, pair, 1);
+	const auto low_bits  = EmitF32ToF16RneBits(state, low);
+	const auto high_bits = EmitF32ToF16RneBits(state, high);
+	const auto high_move = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpShiftLeftLogical, TypeU32(state), high_move, high_bits,
+	                          ConstantU32(state, 16));
+	return EmitOrU32(state, low_bits, high_move);
+}
+
 } // namespace Libs::Graphics::ShaderRecompiler::Spirv::Emitter

@@ -177,8 +177,9 @@ private:
 		std::optional<PreparedBindings> pixel;
 	};
 
-	[[nodiscard]] TextureBinding ResolveTexture(const ShaderRecompiler::IR::ImageResource& resource,
-	                                            const ShaderRecompiler::IR::DescriptorValue& value);
+	[[nodiscard]] TextureBinding ResolveTexture(
+	    const ShaderRecompiler::IR::ImageResource& resource,
+	    const ShaderRecompiler::IR::DescriptorValue& value, SamplerColorMode sampler_color = {});
 	void PrepareGraphicsBindings(std::span<PreparedBindings* const> stages,
 	                             std::span<RenderColorInfo> colors);
 	void ResolveRenderColorTarget(CommandBuffer& buffer, RenderColorInfo& target,
