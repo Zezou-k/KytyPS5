@@ -2059,6 +2059,21 @@ int64_t KYTY_SYSV_ABI recvfrom(int s, void* buf, uint64_t len, int flags, void* 
 	return Network::Net::Recvfrom(s, buf, len, flags, addr, addrlen);
 }
 
+int KYTY_SYSV_ABI getpeername(int s, void* addr, uint32_t* addrlen) {
+	PRINT_NAME();
+	return Network::Net::Getpeername(s, addr, addrlen);
+}
+
+int64_t KYTY_SYSV_ABI sendmsg(int s, const void* msg, int flags) {
+	PRINT_NAME();
+	return Network::Net::Sendmsg(s, msg, flags);
+}
+
+int64_t KYTY_SYSV_ABI recvmsg(int s, void* msg, int flags) {
+	PRINT_NAME();
+	return Network::Net::Recvmsg(s, msg, flags);
+}
+
 int KYTY_SYSV_ABI inet_pton(int af, const char* src, void* dst) {
 	PRINT_NAME();
 
@@ -2260,6 +2275,12 @@ LIB_DEFINE(InitLibKernel_1_Posix) {
 	LIB_FUNC("oBr313PppNE", Posix::sendto);
 	LIB_FUNC("Ez8xjo9UF4E", Posix::recv);
 	LIB_FUNC("lUk6wrGXyMw", Posix::recvfrom);
+	// Real titles (Stray, PAW Patrol, Hollow Knight Silksong) import these peer-address and
+	// scatter/gather calls through the Posix library. NIDs from game captures, names from the
+	// PS5 3.20 stub tables (https://github.com/DNNDHH/PS5-3.20_Libs, libkernel.c).
+	LIB_FUNC("TXFFFiNldU8", Posix::getpeername);
+	LIB_FUNC("aNeavPDNKzA", Posix::sendmsg);
+	LIB_FUNC("hI7oVeOluPM", Posix::recvmsg);
 	LIB_FUNC("4n51s0zEf0c", Posix::inet_pton);
 	LIB_FUNC("5jRCs2axtr4", Posix::inet_ntop);
 	LIB_FUNC("cfwBSQyr5Ys", cfwBSQyr5Ys);
