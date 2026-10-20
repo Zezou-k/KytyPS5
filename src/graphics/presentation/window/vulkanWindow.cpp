@@ -518,13 +518,6 @@ static vk::Device VulkanCreateDevice(GraphicContext& graphics,
 		    "Some games may render incorrectly or crash.\n");
 	}
 	graphics.shader_image_int64_atomics_enabled = image_atomic_int64.shaderImageInt64Atomics;
-	graphics.supports_fragment_barycentric =
-	    barycentric_extension && (supported_barycentric.fragmentShaderBarycentric == VK_TRUE);
-	if (!graphics.supports_fragment_barycentric) {
-		Log::WriteToConsoleAndLog(
-		    "WARNING: VK_KHR_fragment_shader_barycentric is not supported on this device. "
-		    "Pixel shaders requiring custom barycentrics may fail or produce visual artifacts.\n");
-	}
 
 	auto features12 = WindowContext::RequiredVulkan12Features();
 	features12.shaderSharedInt64Atomics = supported_features12.shaderSharedInt64Atomics;
