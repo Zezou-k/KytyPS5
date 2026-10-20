@@ -47,8 +47,12 @@ constexpr OpcodeMap SOP1_OPCODE_LIST[] = {
     {0x0au, Opcode::S_WQM_B64},
     {0x0bu, Opcode::S_BREV_B32},
     {0x0cu, Opcode::S_BREV_B64},
+    {0x0du, Opcode::S_BCNT0_I32_B32},
+    {0x0eu, Opcode::S_BCNT0_I32_B64},
     {0x0fu, Opcode::S_BCNT1_I32_B32},
     {0x10u, Opcode::S_BCNT1_I32_B64},
+    {0x11u, Opcode::S_FF0_I32_B32},
+    {0x12u, Opcode::S_FF0_I32_B64},
     {0x13u, Opcode::S_FF1_I32_B32},
     {0x14u, Opcode::S_FF1_I32_B64},
     {0x15u, Opcode::S_FLBIT_I32_B32},
@@ -112,7 +116,9 @@ constexpr OpcodeMap SOPP_OPCODE_LIST[] = {
     {0x12u, Opcode::S_TRAP},
     {0x16u, Opcode::S_TTRACEDATA},
     {0x17u, Opcode::S_CBRANCH_CDBGSYS},
+    {0x18u, Opcode::S_CBRANCH_CDBGUSER},
     {0x19u, Opcode::S_CBRANCH_CDBGSYS_OR_USER},
+    {0x1au, Opcode::S_CBRANCH_CDBGSYS_AND_USER},
     {0x20u, Opcode::S_INST_PREFETCH},
     {0x23u, Opcode::S_WAITCNT_DEPCTR},
 };
@@ -158,9 +164,23 @@ void DecodeSop1(uint32_t pc, std::span<const uint32_t> code, uint32_t word_index
 	switch (inst.opcode) {
 		case Opcode::S_SWAPPC_B64:
 			inst.branch_target = UINT32_MAX;
-			inst.data_dwords = 2;
+			[[fallthrough]];
+		case Opcode::S_MOV_B64:
+		case Opcode::S_CMOV_B64:
+		case Opcode::S_NOT_B64:
+		case Opcode::S_WQM_B64:
+		case Opcode::S_BREV_B64:
+		case Opcode::S_BITSET0_B64:
+		case Opcode::S_BITSET1_B64:
+		case Opcode::S_AND_SAVEEXEC_B64:
+		case Opcode::S_ORN2_SAVEEXEC_B64:
+		case Opcode::S_QUADMASK_B64:
+		case Opcode::S_ANDN1_SAVEEXEC_B64:
+		case Opcode::S_BITREPLICATE_B64_B32:
+			inst.data_dwords = 2u;
 			break;
 		case Opcode::S_GETPC_B64:
+			inst.data_dwords = 2u;
 			inst.src_count = 0;
 			DecodeScalarDestination(sdst, pc, inst.dst);
 			return;
@@ -200,6 +220,8 @@ void DecodeSop2(uint32_t pc, std::span<const uint32_t> code, uint32_t word_index
 
 	DecodeScalarDestination(sdst, pc, inst.dst);
 	DecodeBinarySources(pc, code, word_index, inst, ssrc0, ssrc1);
+	if (opcode == 0x0bu || (opcode >= 0x0fu && opcode <= 0x25u && (opcode & 1u)) || opcode == 0x29u)
+		inst.data_dwords = 2u;
 }
 
 void DecodeSopk(uint32_t pc, std::span<const uint32_t> code, uint32_t word_index,

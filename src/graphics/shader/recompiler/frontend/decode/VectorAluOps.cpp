@@ -17,7 +17,6 @@ enum class Vop2SdwaProfile {
 	IntegerFullDestination,
 	IntegerPartialDestination,
 	ReverseRightShift,
-	ReverseLogicalLeft,
 	Bitwise,
 	Count,
 };
@@ -48,7 +47,7 @@ constexpr Vop2OpcodeInfo VOP2_OPCODE_LIST[] = {
     {0x17u, Opcode::V_ASHR_I32},
     {0x18u, Opcode::V_ASHRREV_I32, Vop2SdwaProfile::ReverseRightShift},
     {0x19u, Opcode::V_LSHL_B32},
-    {0x1au, Opcode::V_LSHLREV_B32, Vop2SdwaProfile::ReverseLogicalLeft},
+    {0x1au, Opcode::V_LSHLREV_B32, Vop2SdwaProfile::IntegerPartialDestination},
     {0x1bu, Opcode::V_AND_B32, Vop2SdwaProfile::Bitwise},
     {0x1cu, Opcode::V_OR_B32, Vop2SdwaProfile::Bitwise},
     {0x1du, Opcode::V_XOR_B32, Vop2SdwaProfile::Bitwise},
@@ -776,9 +775,10 @@ void DecodeVop1Sdwa(uint32_t pc, std::span<const uint32_t> code, uint32_t word_i
 
 void ApplyDppModifier(Operand& operand, uint32_t modifier, uint32_t encoding) {
 	operand.dpp = true;
-	if (encoding == 233u) {
-		operand.dpp8     = true;
-		operand.dpp_ctrl = modifier >> 8u;
+	if (encoding == 233u || encoding == 234u) {
+		operand.dpp8               = true;
+		operand.dpp_ctrl           = modifier >> 8u;
+		operand.dpp_fetch_inactive = encoding == 234u;
 		return;
 	}
 	operand.negate             = ((modifier >> 20u) & 0x1u) != 0u;
@@ -1039,7 +1039,6 @@ constexpr Vop2SdwaRule VOP2_SDWA_RULES[] = {
     {SdwaSelAll(), SdwaSelAll(), SdwaSelAll(), true, true},
     {SdwaSelFull(), SdwaSelAll(), SdwaSelAll(), false, false},
     {SdwaSelAll(), SdwaSelAll(), SdwaSelAll(), true, false},
-    {SdwaSelFull(), SdwaSelAll(), SdwaSelAll(), false, false},
     {SdwaSelFull(), SdwaSelAll(), SdwaSelAll(), false, false},
     // Bitwise: WriteRawU32 inserts a byte or word destination like any other partial write.
     {SdwaSelAll(), SdwaSelAll(), SdwaSelAll(), true, false},
@@ -1686,7 +1685,8 @@ void DecodeVop2(uint32_t pc, std::span<const uint32_t> code, uint32_t word_index
 		return;
 	}
 	switch (src0) {
-		case 233u: DecodeVop2Dpp(pc, code, word_index, opcode, vdst, vsrc1, inst); return;
+		case 233u:
+		case 234u: DecodeVop2Dpp(pc, code, word_index, opcode, vdst, vsrc1, inst); return;
 		case 249u: DecodeVop2Sdwa(pc, code, word_index, opcode, vdst, vsrc1, inst); return;
 		case 250u: DecodeVop2Dpp(pc, code, word_index, opcode, vdst, vsrc1, inst); return;
 		default: break;
@@ -1721,7 +1721,8 @@ void DecodeVop1(uint32_t pc, std::span<const uint32_t> code, uint32_t word_index
 		return;
 	}
 	switch (src0) {
-		case 233u: DecodeVop1Dpp(pc, code, word_index, opcode, vdst, inst); return;
+		case 233u:
+		case 234u: DecodeVop1Dpp(pc, code, word_index, opcode, vdst, inst); return;
 		case 249u: DecodeVop1Sdwa(pc, code, word_index, opcode, vdst, inst); return;
 		case 250u: DecodeVop1Dpp(pc, code, word_index, opcode, vdst, inst); return;
 		default: break;
