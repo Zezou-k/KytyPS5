@@ -3981,6 +3981,12 @@ private:
 				return;
 			}
 			ValidateAddressHandle(inst.Arg(0), flags.pc);
+			// Scalar-address DWORD loads remain GPU-side reads.
+			// Their residency is tracked separately; do not classify them as DMA.
+			if (memory.kind == ResourceKind::ScalarAddress &&
+    			op == ValueOpcode::LoadAddressU32) {
+   			 	return;
+			}
 			if (address_info.access == AddressAccess::Write) {
 				m_program.has_address_writes = true;
 			}
