@@ -222,7 +222,12 @@ uint32_t EmitF32ToF16RneBits(EmitterState& state, uint32_t f32) {
 	const auto raw      = state.builder.AllocateId();
 	state.builder.AddFunction(spv::OpBitcast, TypeU32(state), raw, f32);
 	const auto mant     = EmitAndConstant(state, raw, 0x007fffffu);
-	const auto exponent = EmitAndConstant(state, EmitShiftRightConstant(state, raw, 23), 0xffu);
+	const auto exponent =
+    EmitAndConstant(
+        state,
+        Binary(state, spv::OpShiftRightLogical, TypeU32(state),
+               raw, ConstantU32(state, 23)),
+        0xffu);
 
 	// Packed half rounded away from zero in every band; its low bit doubles as
 	// the kept-LSB test for both the normal and the subnormal bands.
