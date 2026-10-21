@@ -15,6 +15,8 @@
 #include <cstring>
 #include <deque>
 #include <mutex>
+#include <utility>
+#include <vector>
 
 namespace Libs {
 
@@ -75,12 +77,33 @@ struct SystemServiceEvent {
 	uint8_t data[8192];
 };
 
-static std::mutex          g_event_mutex;
-static std::deque<int32_t> g_events;
+struct PendingEvent {
+	int                    type = 0;
+	std::vector<uint8_t>   payload {};
+};
+
+static std::mutex        g_event_mutex;
+static std::deque<PendingEvent> g_events;
+
+// The guest-side SystemServiceEvent carries an int32_t type plus up to 8192
+// bytes of event-specific data, so an event is queued with its full payload and
+// copied verbatim into the caller's buffer by SystemServiceReceiveEvent.
+void PostEvent(int event_type, const void* data, size_t size) {
+	EXIT_IF(data == nullptr && size != 0);
+	EXIT_IF(size > sizeof(SystemServiceEvent) - sizeof(int32_t));
+
+	PendingEvent event {};
+	event.type = event_type;
+	if (size != 0) {
+		event.payload.resize(size);
+		std::memcpy(event.payload.data(), data, size);
+	}
+	std::scoped_lock lock(g_event_mutex);
+	g_events.push_back(std::move(event));
+}
 
 void NotifyEntitlementUpdate() {
-	std::scoped_lock lock(g_event_mutex);
-	g_events.push_back(0x10000003); // SCE_SYSTEM_SERVICE_EVENT_ENTITLEMENT_UPDATE
+	PostEvent(EventEntitlementUpdate, nullptr, 0);
 }
 
 struct SystemServiceDisplaySafeAreaInfo {
@@ -175,7 +198,11 @@ static int KYTY_SYSV_ABI SystemServiceReceiveEvent(SystemServiceEvent* event) {
 	if (g_events.empty()) {
 		return SYSTEM_SERVICE_ERROR_NO_EVENT;
 	}
-	event->event_type = g_events.front();
+	const PendingEvent& pending = g_events.front();
+	event->event_type           = pending.type;
+	if (!pending.payload.empty()) {
+		std::memcpy(event->data, pending.payload.data(), pending.payload.size());
+	}
 	g_events.pop_front();
 	LOGF("\t SystemService event = 0x%08x\n", static_cast<uint32_t>(event->event_type));
 	return OK;

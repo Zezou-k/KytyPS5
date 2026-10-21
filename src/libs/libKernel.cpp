@@ -1853,6 +1853,11 @@ LIB_DEFINE(InitLibKernelWriteThrottling) {
 
 } // namespace LibKernelWriteThrottling
 
+namespace LibNet {
+// Defined in libNet.cpp; the Posix library exposes socket calls with its own NIDs.
+int KYTY_SYSV_ABI NetShutdown(int s, int how);
+} // namespace LibNet
+
 namespace Posix {
 
 LIB_VERSION("Posix", 1, "libkernel", 1, 1);
@@ -2057,6 +2062,21 @@ int64_t KYTY_SYSV_ABI recvfrom(int s, void* buf, uint64_t len, int flags, void* 
 	return Network::Net::Recvfrom(s, buf, len, flags, addr, addrlen);
 }
 
+int KYTY_SYSV_ABI getpeername(int s, void* addr, uint32_t* addrlen) {
+	PRINT_NAME();
+	return Network::Net::Getpeername(s, addr, addrlen);
+}
+
+int64_t KYTY_SYSV_ABI sendmsg(int s, const void* msg, int flags) {
+	PRINT_NAME();
+	return Network::Net::Sendmsg(s, msg, flags);
+}
+
+int64_t KYTY_SYSV_ABI recvmsg(int s, void* msg, int flags) {
+	PRINT_NAME();
+	return Network::Net::Recvmsg(s, msg, flags);
+}
+
 int KYTY_SYSV_ABI inet_pton(int af, const char* src, void* dst) {
 	PRINT_NAME();
 
@@ -2163,6 +2183,10 @@ int KYTY_SYSV_ABI UmtxOp(volatile void* address, int operation, uint64_t value,
 }
 
 LIB_DEFINE(InitLibKernel_1_Posix) {
+	// Guest-facing POSIX names imported by real titles through the separate
+	// "Posix" library (example mapping: shadPS4 kernel.cpp exports the same
+	// functions under libScePosix). Straight aliases to the same code that the
+	// libkernel names use.
 	LIB_FUNC("k+AXqu2-eBc", getpagesize);
 	LIB_FUNC("lLMT9vJAck0", clock_gettime);
 	LIB_FUNC("smIj7eqzZE8", clock_getres);
@@ -2256,9 +2280,24 @@ LIB_DEFINE(InitLibKernel_1_Posix) {
 	LIB_FUNC("oBr313PppNE", Posix::sendto);
 	LIB_FUNC("Ez8xjo9UF4E", Posix::recv);
 	LIB_FUNC("lUk6wrGXyMw", Posix::recvfrom);
+	// Real titles (Stray, PAW Patrol, Hollow Knight Silksong) import these peer-address and
+	// scatter/gather calls through the Posix library. NIDs from game captures, names from the
+	// PS5 3.20 stub tables (https://github.com/DNNDHH/PS5-3.20_Libs, libkernel.c).
+	LIB_FUNC("TXFFFiNldU8", Posix::getpeername);
+	LIB_FUNC("aNeavPDNKzA", Posix::sendmsg);
+	LIB_FUNC("hI7oVeOluPM", Posix::recvmsg);
 	LIB_FUNC("4n51s0zEf0c", Posix::inet_pton);
 	LIB_FUNC("5jRCs2axtr4", Posix::inet_ntop);
 	LIB_FUNC("cfwBSQyr5Ys", cfwBSQyr5Ys);
+
+	// Guest-verified NIDs real titles (Stray, PAW Patrol, Hollow Knight Silksong)
+	// import through the Posix library that this block lacked. Names come from
+	// shadPS4's libScePosix table (https://github.com/shadps4-emu/shadPS4,
+	// src/core/libraries/kernel/kernel.cpp, issues #860/#4764) and bind the
+	// imports to the same Kyty implementations the SDK-spelled names use.
+	LIB_FUNC("NN01qLRhiqU", LibKernel::FileSystem::KernelRename); // rename
+	LIB_FUNC("c7ZnT7V1B98", LibKernel::FileSystem::KernelRmdir); // rmdir
+	LIB_FUNC("TUuiYS2kE8s", LibNet::NetShutdown);                // shutdown
 }
 
 } // namespace Posix
@@ -2820,6 +2859,30 @@ int chmod(const char* path, int mode) {
 	return OK;
 }
 
+// Guest-verified libkernel NIDs real titles (Stray, PAW Patrol, Hollow Knight
+// Silksong) import (mapped via shadPS4 issues #860/#4764).
+
+// Timestamp setter; metadata-only no-op on the host, same precedent as chmod.
+int KYTY_SYSV_ABI sceKernelUtimes(const char* path, void* times) {
+	PRINT_NAME();
+
+	LOGF("\t path = %s\n", path != nullptr ? path : "(null)");
+
+	return OK;
+}
+
+// Guest pages are emulated with the backing store resident, so a strict lock is a
+// successful no-op (WARNING behavior semantics unverified).
+int KYTY_SYSV_ABI sceKernelMlock(void* addr, uint64_t size) {
+	PRINT_NAME();
+
+	LOGF("\t addr = 0x%016" PRIx64 "\n"
+	     "\t size = 0x%016" PRIx64 "\n",
+	     static_cast<uint64_t>(reinterpret_cast<uintptr_t>(addr)), size);
+
+	return OK;
+}
+
 int KYTY_SYSV_ABI KernelAioInitializeImpl(void* param, int32_t size) {
 	PRINT_NAME();
 
@@ -3346,6 +3409,12 @@ LIB_DEFINE(InitLibKernel_1_Pthread) {
 	LIB_FUNC("mqQMh1zPPT8", Posix::fstat);
 
 	LIB_FUNC("z0dtnPxYgtg", chmod);
+	// Guest-verified NIDs (shadPS4 issues #860/#4764); chmod/utimes follow the same
+	// metadata-only precedent, mlock succeeds because guest pages stay resident.
+	LIB_FUNC("fgIsQ10xYVA", chmod);             // sceKernelChmod
+	LIB_FUNC("0Cq8ipKr9n0", sceKernelUtimes);   // sceKernelUtimes
+	LIB_FUNC("3k6kx-zOOSQ", sceKernelMlock);    // sceKernelMlock
+	LIB_FUNC("c7ZnT7V1B98", FileSystem::KernelRmdir); // sceKernelRmdir alias
 	LIB_FUNC("VAzswvTOCzI", FileSystem::KernelUnlink);
 	LIB_FUNC("JGMio+21L4c", Posix::mkdir);
 	LIB_FUNC("wuCroIGjt2g", FileSystem::KernelOpen);

@@ -13,6 +13,7 @@
 #include "common/platform/sysTimer.h"
 #include "common/stringUtils.h"
 
+#include <algorithm>
 #include <cstdlib>
 #include <cstring>
 #include <vector>
@@ -66,7 +67,29 @@ static DWORD GetCacheAccessType(sys_file_cache_type_t t) {
 void SysFileRead(void* data, uint32_t size, sys_file_t& f, uint32_t* bytes_read) {
 	if (f.type == SYS_FILE_FILE) {
 		DWORD w = 0;
-		ReadFile(f.handle, data, size, &w, nullptr);
+		LARGE_INTEGER zero {};
+		LARGE_INTEGER start {};
+		const bool can_rewind = SetFilePointerEx(f.handle, zero, &start, FILE_CURRENT) != FALSE;
+		if (ReadFile(f.handle, data, size, &w, nullptr) == FALSE) {
+			const DWORD error = GetLastError();
+			// Kernel-mode writes cannot invoke the guest write-fault handler on pages
+			// protected for GPU tracking. Copy from a host buffer in user mode instead.
+			if (can_rewind && (error == ERROR_NOACCESS || error == ERROR_INVALID_USER_BUFFER) &&
+			    SetFilePointerEx(f.handle, start, nullptr, FILE_BEGIN) != FALSE) {
+				w = 0;
+				thread_local std::vector<uint8_t> chunk(1u << 20u);
+				while (w < size) {
+					const DWORD request = std::min<DWORD>(size - w, static_cast<DWORD>(chunk.size()));
+					DWORD received = 0;
+					if (ReadFile(f.handle, chunk.data(), request, &received, nullptr) == FALSE ||
+					    received == 0) {
+						break;
+					}
+					std::memcpy(static_cast<uint8_t*>(data) + w, chunk.data(), received);
+					w += received;
+				}
+			}
+		}
 		if (bytes_read != nullptr) {
 			*bytes_read = w;
 		}
@@ -317,6 +340,7 @@ bool SysFileUnlink(sys_file_t& f, const std::filesystem::path& name) {
 	return SysFileDeleteFile(name);
 }
 
+// Seeks a file; for memory-backed files the position is clamped to the buffer size.
 bool SysFileSeek(sys_file_t& f, uint64_t offset) {
 	bool ok = true;
 	if (f.type == SYS_FILE_FILE) {
@@ -325,7 +349,7 @@ bool SysFileSeek(sys_file_t& f, uint64_t offset) {
 		ok         = (SetFilePointerEx(f.handle, s, nullptr, FILE_BEGIN) != 0);
 		// printf("seek: %u\n", offset);
 	} else if (f.type == SYS_FILE_MEMORY_STAT || f.type == SYS_FILE_MEMORY_DYN) {
-		f.buf->ptr = f.buf->base + offset;
+		f.buf->ptr = f.buf->base + std::min(offset, static_cast<uint64_t>(f.buf->size));
 	}
 
 	return ok;

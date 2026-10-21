@@ -51,6 +51,53 @@ namespace {
 
 using BindingKind = ShaderRecompiler::IR::DescriptorBindingKind;
 
+// PS5 sampler color state is paired with an image, while Vulkan stores the decoded format in
+// the image view. Only override the view when every pair using the image agrees.
+SamplerColorMode ResolveSamplerColorMode(const ShaderRecompiler::IR::CompiledShaderInfo& program,
+                                          const ShaderRecompiler::IR::ResourceSnapshot& snapshot,
+                                          uint32_t image_index) {
+	SamplerColorMode result;
+	for (const auto& pair: program.info.sampled_pairs) {
+		if (pair.image != image_index) {
+			continue;
+		}
+		if (pair.sampler >= snapshot.samplers.size()) {
+			return {};
+		}
+		const auto sampler =
+		    DecodeNativeDescriptor<ShaderSamplerResource>(snapshot.samplers[pair.sampler]);
+		if (!result.valid) {
+			result.valid          = true;
+			result.force_srgb     = sampler.ForceSrgb();
+			result.disable_degamma = sampler.DisableDegamma();
+		} else if (result.force_srgb != sampler.ForceSrgb() ||
+		           result.disable_degamma != sampler.DisableDegamma()) {
+			return {};
+		}
+	}
+	return result;
+}
+
+// These are the host formats whose alternate sRGB views are already accepted by the device
+// selection checks. Formats without a validated alternate view stay on their original view.
+vk::Format SelectSamplerColorFormat(vk::Format format, SamplerColorMode mode) {
+	if (!mode.valid || mode.force_srgb == mode.disable_degamma) {
+		return format;
+	}
+	if (mode.force_srgb) {
+		switch (format) {
+			case vk::Format::eR8G8B8A8Unorm: return vk::Format::eR8G8B8A8Srgb;
+			case vk::Format::eBc3UnormBlock: return vk::Format::eBc3SrgbBlock;
+			default: return format;
+		}
+	}
+	switch (format) {
+		case vk::Format::eR8G8B8A8Srgb: return vk::Format::eR8G8B8A8Unorm;
+		case vk::Format::eBc3SrgbBlock: return vk::Format::eBc3UnormBlock;
+		default: return format;
+	}
+}
+
 } // namespace
 
 vk::DescriptorType NativeDescriptorType(BindingKind kind) {
@@ -459,8 +506,9 @@ static bool ResolveTextureMipView(ImageInfo& info, uint32_t physical_levels, boo
 	return false;
 }
 
-TextureBinding RenderExecutor::ResolveTexture(const ShaderRecompiler::IR::ImageResource&   resource,
-                                              const ShaderRecompiler::IR::DescriptorValue& value) {
+TextureBinding RenderExecutor::ResolveTexture(
+    const ShaderRecompiler::IR::ImageResource& resource,
+    const ShaderRecompiler::IR::DescriptorValue& value, SamplerColorMode sampler_color) {
 	if (resource.atomic64 && !m_context.GetGraphics().shader_image_int64_atomics_enabled) {
 		EXIT("64-bit image atomics require shaderImageInt64Atomics\n");
 	}
@@ -546,9 +594,9 @@ TextureBinding RenderExecutor::ResolveTexture(const ShaderRecompiler::IR::ImageR
 	                                 : raw_sint_format != Prospero::BufferFormat::kInvalid
 	                                     ? VulkanFormat(raw_sint_format)
 	                                     : SrgbStorageViewFormat(pixel_format);
-	const auto view_format         = storage && storage_view_format != vk::Format::eUndefined
-	                                     ? storage_view_format
-	                                     : pixel_format;
+	const auto view_format = storage && storage_view_format != vk::Format::eUndefined
+	                             ? storage_view_format
+	                             : SelectSamplerColorFormat(pixel_format, sampler_color);
 	const auto block_bytes         = Prospero::BlockCompressedBytesPerBlock(format);
 	TextureCache::ImageDesc desc {};
 	desc.info.data         = {address, 0};
@@ -610,7 +658,7 @@ TextureBinding RenderExecutor::ResolveTexture(const ShaderRecompiler::IR::ImageR
 	} else if (storage) {
 		ValidateStorageColorView(image->info.pixel_format, view_format, descriptor.DstSelXYZW());
 	} else {
-		(void)SelectSampledColorView(image->info.pixel_format, pixel_format,
+		(void)SelectSampledColorView(image->info.pixel_format, view_format,
 		                             descriptor.DstSelXYZW());
 	}
 	return {id, nullptr, std::move(desc)};
@@ -684,7 +732,8 @@ void RenderExecutor::PrepareBindings(const ShaderStageRuntime& runtime,
 	prepared.samplers.clear();
 	prepared.shader_data.clear();
 	for (uint32_t i = 0; i < program.info.images.size(); i++) {
-		auto binding = ResolveTexture(program.info.images[i], snapshot.images[i]);
+		const auto sampler_color = ResolveSamplerColorMode(program, snapshot, i);
+		auto binding = ResolveTexture(program.info.images[i], snapshot.images[i], sampler_color);
 		BindImage(binding.image_id, binding.desc.type == TextureCache::BindingType::Storage);
 		binding.mip_views.swap(prepared.images[i].mip_views);
 		binding.mip_views.clear();
@@ -714,6 +763,8 @@ void RenderExecutor::FindBuffers(std::span<PreparedBindings* const> stages) {
 		const auto& program  = *prepared.runtime->program;
 		const auto& snapshot = *prepared.runtime->resources;
 		const auto& layout = program.bindings;
+		// A BDA miss reads zero and is only mapped after the dispatch; map the known reads now.
+		m_context.FindBdaBuffers(snapshot.gpu_scalar_reads);
 		prepared.buffer_sources.resize(layout.descriptor_counts[static_cast<size_t>(BindingKind::Buffers)]);
 		if (layout.descriptor_counts[static_cast<size_t>(BindingKind::Buffers)] == 0) {
 			continue;
@@ -815,7 +866,8 @@ void RenderExecutor::RebindImages(PreparedBindings& prepared) {
 			if (old_image != nullptr) {
 				old_image->binding = {};
 			}
-			images[i] = ResolveTexture(program.info.images[i], snapshot.images[i]);
+			const auto sampler_color = ResolveSamplerColorMode(program, snapshot, i);
+			images[i] = ResolveTexture(program.info.images[i], snapshot.images[i], sampler_color);
 			BindImage(images[i].image_id,
 			          images[i].desc.type == TextureCache::BindingType::Storage);
 		}

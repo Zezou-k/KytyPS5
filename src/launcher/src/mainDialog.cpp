@@ -63,7 +63,8 @@ constexpr DWORD CMD_Y_CHARS = 1000;
 #endif
 constexpr char SETTINGS_MAIN_DIALOG[]        = "MainDialog";
 constexpr char SETTINGS_MAIN_LAST_GEOMETRY[] = "geometry";
-constexpr char SETTINGS_CHECK_UPDATES[]      = "check_updates_on_startup";
+constexpr char SETTINGS_CHECK_UPDATES[]       = "check_updates_on_startup";
+constexpr char SETTINGS_SKIP_SPLASH[]         = "skip_boot_splash";
 constexpr char SETTINGS_THEME[]              = "theme";
 
 class MainDialogPrivate: public QObject {
@@ -89,6 +90,7 @@ public:
 private:
 	static QByteArray g_last_geometry;
 	static bool       g_check_updates_on_startup;
+	static bool       g_skip_boot_splash;
 	static int        g_theme;
 
 	static void ApplyTheme(int theme) {
@@ -115,6 +117,8 @@ private:
 
 QByteArray MainDialogPrivate::g_last_geometry;
 bool       MainDialogPrivate::g_check_updates_on_startup = true;
+bool       MainDialogPrivate::g_skip_boot_splash         = false;
+bool       MainDialog::m_skip_boot_splash                = false;
 int        MainDialogPrivate::g_theme                    = 0;
 
 MainDialog::MainDialog(QWidget* parent): QDialog(parent), m_p(new MainDialogPrivate(this)) {
@@ -134,12 +138,16 @@ void MainDialogPrivate::Setup(MainDialog* main_dialog) {
 	m_main_dialog = main_dialog;
 	m_update_checker = new UpdateChecker(main_dialog);
 	m_ui->check_updates_on_startup->setChecked(g_check_updates_on_startup);
+	m_ui->skip_boot_splash->setChecked(g_skip_boot_splash);
 	m_ui->theme_combo->setCurrentIndex(g_theme);
 	ApplyTheme(g_theme);
 	m_ui->check_updates_link->setVisible(UpdateChecker::IsSupported());
 	m_ui->check_updates_on_startup->setVisible(UpdateChecker::IsSupported());
 
-	main_dialog->setWindowFlags(Qt::Dialog /*| Qt::MSWindowsFixedSizeDialogHint*/);
+	// Present the launcher like the PS5 home screen: an app-sized dark shell.
+	// Fullscreen is opt-in through global settings rather than forced.
+	main_dialog->setWindowTitle(tr("KytyPS5"));
+	main_dialog->setWindowFlags(Qt::Window);
 
 	connect(main_dialog, &MainDialog::Start, this, &MainDialogPrivate::FindInterpreter,
 	        Qt::QueuedConnection);
@@ -164,6 +172,10 @@ void MainDialogPrivate::Setup(MainDialog* main_dialog) {
 	connect(m_update_checker, &UpdateChecker::InstallingChanged, this, &MainDialogPrivate::Update);
 	connect(m_ui->check_updates_on_startup, &QCheckBox::toggled, this, [this](bool checked) {
 		g_check_updates_on_startup = checked;
+		m_ui->widget->WriteSettings();
+	});
+	connect(m_ui->skip_boot_splash, &QCheckBox::toggled, this, [this](bool checked) {
+		g_skip_boot_splash = checked;
 		m_ui->widget->WriteSettings();
 	});
 	connect(m_ui->theme_combo, &QComboBox::currentIndexChanged, this, [this](int index) {
@@ -524,6 +536,9 @@ void MainDialog::WriteSettings(QSettings& s) {
 
 void MainDialog::ReadSettings(QSettings& s) {
 	MainDialogPrivate::ReadSettings(s);
+	s.beginGroup(SETTINGS_MAIN_DIALOG);
+	m_skip_boot_splash = s.value(SETTINGS_SKIP_SPLASH, false).toBool();
+	s.endGroup();
 }
 
 void MainDialog::resizeEvent(QResizeEvent* event) {
@@ -538,6 +553,7 @@ void MainDialogPrivate::WriteSettings(QSettings& s) {
 		s.setValue(SETTINGS_MAIN_LAST_GEOMETRY, g_last_geometry);
 	}
 	s.setValue(SETTINGS_CHECK_UPDATES, g_check_updates_on_startup);
+	s.setValue(SETTINGS_SKIP_SPLASH, g_skip_boot_splash);
 	s.setValue(SETTINGS_THEME, g_theme);
 
 	s.endGroup();
@@ -548,6 +564,7 @@ void MainDialogPrivate::ReadSettings(QSettings& s) {
 
 	g_last_geometry = s.value(SETTINGS_MAIN_LAST_GEOMETRY, g_last_geometry).toByteArray();
 	g_check_updates_on_startup = s.value(SETTINGS_CHECK_UPDATES, true).toBool();
+	g_skip_boot_splash = s.value(SETTINGS_SKIP_SPLASH, false).toBool();
 	g_theme                    = s.value(SETTINGS_THEME, 0).toInt();
 	if (g_theme < 0 || g_theme > 2) {
 		g_theme = 0;

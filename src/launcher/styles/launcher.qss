@@ -1,52 +1,71 @@
+// KytyPS5 launcher — PS5 home-screen visual language.
+// Base tones follow the PS5 system software: near-black background, white text,
+// soft glow (no blue link colors), rounded translucent panels.
+
+QWidget#MainDialog {
+    background: #000000;
+}
+
 QListView#cfgs_grid {
-    background: palette(base);
-    border: 1px solid palette(mid);
-    color: palette(text);
+    background: transparent;
+    border: 0;
+    color: #ffffff;
 }
 
 QListView#cfgs_grid::item {
-    padding: 8px;
+    background: transparent;
+    border: 0;
+    border-radius: 6px;
+    padding: 2px;
 }
 
-GameListTreeWidget#cfgs_list {
+/* PS5-style floating selection: white glow ring around the focused tile. */
+QListView#cfgs_grid::item:selected {
+    background: rgba(255, 255, 255, 0.14);
+    border: 1px solid rgba(255, 255, 255, 0.35);
+    color: #ffffff;
+}
+
+QListView#cfgs_grid::item:hover:!selected {
+    background: rgba(255, 255, 255, 0.08);
+}GameListTreeWidget#cfgs_list {
     background: transparent;
-    border: 1px solid palette(mid);
-    color: palette(text);
-    outline: 0;
+    border: 0;
+    color: #ffffff;
 }
 
 GameListTreeWidget#cfgs_list::item {
     background: transparent;
-    border-bottom: 1px solid palette(mid);
+    border: 0;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
     padding: 4px;
+    color: #ffffff;
 }
 
 GameListTreeWidget#cfgs_list::item:selected {
-    background: palette(highlight);
-    color: palette(highlighted-text);
+    background: rgba(255, 255, 255, 0.14);
+    color: #ffffff;
 }
 
 GameListTreeWidget#cfgs_list QHeaderView::section {
-    background: palette(button);
-    color: palette(button-text);
+    background: transparent;
+    color: rgba(255, 255, 255, 0.55);
     border: 0;
-    border-right: 1px solid palette(mid);
-    border-bottom: 1px solid palette(mid);
+    border-right: 1px solid rgba(255, 255, 255, 0.08);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
     padding: 5px 6px;
-}
-
-QLineEdit#search_line_edit {
-    background: palette(base);
-    border: 1px solid palette(mid);
-    border-radius: 4px;
-    color: palette(text);
-    padding: 5px 8px;
-    selection-background-color: palette(highlight);
-    selection-color: palette(highlighted-text);
-}
-
-QLineEdit#search_line_edit:focus {
-    border-color: palette(highlight);
+}QLineEdit#search_line_edit {
+    background: rgba(255, 255, 255, 0.08);
+    border: 1px solid rgba(255, 255, 255, 0.18);
+    border-radius: 14px;
+    color: #ffffff;
+    padding: 5px 12px;
+    selection-background-color: #ffffff;
+    selection-color: #000000;
+}
+
+QLineEdit#search_line_edit:focus {
+    border-color: rgba(255, 255, 255, 0.6);
 }
 
 QToolButton#grid_view_button,

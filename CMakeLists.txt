@@ -419,6 +419,14 @@ add_executable(archive_file_tests EXCLUDE_FROM_ALL
 target_link_libraries(archive_file_tests common ZArchive::zarchive)
 target_include_directories(archive_file_tests PRIVATE ${inc_headers})
 
+if(WIN32)
+	add_executable(windows_file_read_tests EXCLUDE_FROM_ALL
+		"${KYTY_TESTS_DIR}/WindowsFileReadTests.cpp"
+	)
+	target_link_libraries(windows_file_read_tests common ZArchive::zarchive)
+	target_include_directories(windows_file_read_tests PRIVATE ${inc_headers})
+endif()
+
 add_executable(trophy_system_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/TrophySystemTests.cpp"
 )
@@ -566,6 +574,16 @@ add_kyty_full_emulator_test(kernel_file_system_tests
 	"${KYTY_TESTS_DIR}/KernelFileSystemTests.cpp")
 target_link_libraries(kernel_file_system_tests ZArchive::zarchive)
 
+# Resolves LIB_FUNC registrations against the PLT imports the capture logs recorded,
+# so new unresolved stubs fail ctest instead of shipping to games.
+get_filename_component(KYTY_REPO_ROOT_DIR "${KYTY_SOURCE_DIR}" DIRECTORY)
+cmake_path(SET KYTY_REPO_ROOT_DEFINE "${KYTY_REPO_ROOT_DIR}")
+cmake_path(SET KYTY_REPO_ROOT_DEFINE "${KYTY_REPO_ROOT_DEFINE}" NORMALIZE)
+add_kyty_full_emulator_test(stub_import_coverage_tests
+	"${KYTY_TESTS_DIR}/StubImportCoverageTests.cpp")
+target_compile_definitions(stub_import_coverage_tests
+	PRIVATE KYTY_SOURCE_ROOT="${KYTY_REPO_ROOT_DEFINE}")
+
 add_executable(sync_on_address_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/SyncOnAddressTests.cpp"
 	"${KYTY_SOURCE_DIR}/kernel/syncOnAddress.cpp"
@@ -632,6 +650,9 @@ if(BUILD_TESTING)
 	add_test(NAME memory_tracker COMMAND $<TARGET_FILE:memory_tracker_tests>)
 	add_test(NAME page_manager COMMAND $<TARGET_FILE:page_manager_tests>)
 	add_test(NAME archive_file COMMAND $<TARGET_FILE:archive_file_tests>)
+	if(WIN32)
+		add_test(NAME windows_file_read COMMAND $<TARGET_FILE:windows_file_read_tests>)
+	endif()
 	add_test(NAME trophy_system COMMAND $<TARGET_FILE:trophy_system_tests>)
 	add_test(NAME avplayer_file COMMAND $<TARGET_FILE:avplayer_file_tests>)
 	add_test(NAME vdecsw COMMAND $<TARGET_FILE:vdecsw_tests>)
@@ -654,6 +675,7 @@ if(BUILD_TESTING)
 	add_test(NAME ces COMMAND $<TARGET_FILE:ces_tests>)
 	add_test(NAME save_data_dialog COMMAND $<TARGET_FILE:save_data_dialog_tests>)
 	add_test(NAME http_uri_parse COMMAND $<TARGET_FILE:http_uri_parse_tests>)
+	add_test(NAME stub_import_coverage COMMAND $<TARGET_FILE:stub_import_coverage_tests>)
 	add_test(NAME shader_recompiler_compute COMMAND $<TARGET_FILE:shader_recompiler_compute_tests>)
 	add_test(NAME shader_recompiler_tessellation
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --tessellation-only)
@@ -737,6 +759,9 @@ if(BUILD_TESTING)
 		save_data_dialog_tests
 		http_uri_parse_tests
 	)
+	if(WIN32)
+		add_dependencies(kyty_tests windows_file_read_tests)
+	endif()
 endif()
 
 # Test Darwin signal-context restoration for SSE4a instructions.

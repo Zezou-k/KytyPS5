@@ -51,6 +51,7 @@
 #include <optional>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -884,6 +885,8 @@ struct SocketTransport {
 	std::atomic<NativeSocket> socket;
 	const int                type;
 #if defined(_WIN32)
+	// Winsock cannot report the current mode, so the guest blocking mode is tracked here.
+	std::atomic_bool nonblocking {false};
 	std::mutex         receive_mutex;
 	std::vector<char>  receive_buffer;
 	std::atomic_size_t buffered_bytes   = 0;
@@ -912,6 +915,26 @@ struct NetTimeval {
 	int64_t tv_sec;
 	int64_t tv_usec;
 };
+
+// Guest (PS5) scatter/gather message types, resolved against the real-game imports.
+// Layout verified against shadPS4's OrbisNetIovec/OrbisNetMsghdr (src/core/libraries/net/net_types.h)
+// and the ps5-payload-sdk FreeBSD 11.4 sys/socket.h: msg_iovlen is a 32-bit int, not size_t.
+struct GuestIovec {
+	void*    iov_base;
+	uint64_t iov_len;
+};
+static_assert(sizeof(GuestIovec) == 16);
+
+struct GuestMsghdr {
+	void*       msg_name;
+	uint32_t    msg_namelen;
+	GuestIovec* msg_iov;
+	int32_t     msg_iovlen;
+	void*       msg_control;
+	uint32_t    msg_controllen;
+	int32_t     msg_flags;
+};
+static_assert(sizeof(GuestMsghdr) == 48);
 
 static constexpr int                         SOCKET_FD_MIN = 128;
 static constexpr int                         SOCKET_FD_MAX = 1024;
@@ -1085,7 +1108,24 @@ static int ConvertSocketOptionName(int level, int option) {
 			case 0x1002: return SO_RCVBUF;
 			case 0x1007: return SO_ERROR;
 			case 0x1105: return SO_SNDTIMEO;
-			default: break;
+#if defined(_WIN32)
+			// Winsock numbers its remaining BSD socket-level options like the guest. It reports any
+			// other option as WSAEINVAL instead of WSAENOPROTOOPT, so keep those from the host.
+			case SO_DEBUG:
+			case SO_ACCEPTCONN:
+			case SO_REUSEADDR:
+			case SO_KEEPALIVE:
+			case SO_DONTROUTE:
+			case SO_USELOOPBACK:
+			case SO_LINGER:
+			case SO_OOBINLINE:
+			case SO_SNDLOWAT:
+			case SO_RCVLOWAT:
+			case SO_SNDTIMEO:
+			case SO_RCVTIMEO:
+			case SO_TYPE: return option;
+#endif
+			default: return -1;
 		}
 	} else if (level == 6 && option == 1) {
 		return TCP_NODELAY;
@@ -1108,13 +1148,13 @@ static int* P2pSocketOption(P2pEndpoint& endpoint, int option) {
 	}
 }
 
-static int ConvertMessageFlags(int flags) {
-	constexpr int guest_msg_peek      = 0x00000002;
-	constexpr int guest_msg_dontroute = 0x00000004;
-	constexpr int guest_msg_waitall   = 0x00000040;
-	constexpr int guest_msg_dontwait  = 0x00000080;
-	constexpr int guest_msg_nosignal  = 0x00020000;
+constexpr int guest_msg_peek      = 0x00000002;
+constexpr int guest_msg_dontroute = 0x00000004;
+constexpr int guest_msg_waitall   = 0x00000040;
+constexpr int guest_msg_dontwait  = 0x00000080;
+constexpr int guest_msg_nosignal  = 0x00020000;
 
+static int ConvertMessageFlags(int flags) {
 	int host_flags = 0;
 	if ((flags & guest_msg_peek) != 0) {
 		host_flags |= MSG_PEEK;
@@ -1211,6 +1251,36 @@ static int ConvertHostSockaddr(const sockaddr_storage* addr, SocketLength addrle
 	std::memcpy(bytes + 2, &in->sin_port, sizeof(in->sin_port));
 	std::memcpy(bytes + 4, &in->sin_addr, sizeof(in->sin_addr));
 	*out_len = guest_addrlen;
+	return 0;
+}
+
+// Validation shared by sendmsg/recvmsg, following shadPS4's GatherSize semantics for
+// the same guest callers: a signed iovec count, a 1024-iovec cap, null-base checking
+// for nonzero lengths, and an INT32_MAX total-size cap.
+static int GuestMsgGatherSize(const GuestMsghdr& guest, uint64_t* out_total) {
+	EXIT_IF(out_total == nullptr);
+
+	if (guest.msg_iovlen < 0 || (guest.msg_iovlen > 0 && guest.msg_iov == nullptr)) {
+		*Posix::GetErrorAddr() = Posix::POSIX_EINVAL;
+		return -1;
+	}
+	if (guest.msg_iovlen > 1024) {
+		*Posix::GetErrorAddr() = Posix::POSIX_EMSGSIZE;
+		return -1;
+	}
+	uint64_t total = 0;
+	for (int32_t i = 0; i < guest.msg_iovlen; i++) {
+		if (guest.msg_iov[i].iov_base == nullptr && guest.msg_iov[i].iov_len != 0) {
+			*Posix::GetErrorAddr() = Posix::POSIX_EFAULT;
+			return -1;
+		}
+		total += guest.msg_iov[i].iov_len;
+		if (total > static_cast<uint64_t>(std::numeric_limits<int32_t>::max())) {
+			*Posix::GetErrorAddr() = Posix::POSIX_EINVAL;
+			return -1;
+		}
+	}
+	*out_total = total;
 	return 0;
 }
 
@@ -2053,7 +2123,8 @@ int KYTY_SYSV_ABI Accept(int s, void* addr, uint32_t* addrlen) {
 	     s, reinterpret_cast<uint64_t>(addr), reinterpret_cast<uint64_t>(addrlen));
 
 	NativeSocket socket = INVALID_NATIVE_SOCKET;
-	if (!GetSocketBackend(s, &socket)) {
+	SocketSlot   state;
+	if (!GetSocketBackend(s, &socket, &state)) {
 		return -1;
 	}
 
@@ -2065,8 +2136,17 @@ int KYTY_SYSV_ABI Accept(int s, void* addr, uint32_t* addrlen) {
 		return SetHostSocketError();
 	}
 
-	auto      transport = std::make_shared<SocketTransport>(accepted, SOCK_STREAM);
-	const int fd        = AllocSocketFd(transport);
+	auto transport = std::make_shared<SocketTransport>(accepted, SOCK_STREAM);
+#if defined(_WIN32)
+	// FreeBSD accept(2) inherits O_NONBLOCK. Keep both the native Winsock mode and the
+	// guest-side flag in sync so later receives preserve that behavior.
+	u_long nonblocking = state.transport->nonblocking ? 1 : 0;
+	if (ioctlsocket(accepted, FIONBIO, &nonblocking) == SOCKET_ERROR) {
+		return SetHostSocketError();
+	}
+	transport->nonblocking = nonblocking != 0;
+#endif
+	const int fd = AllocSocketFd(transport);
 	if (fd < 0) {
 		*Posix::GetErrorAddr() = Posix::POSIX_EMFILE;
 		return -1;
@@ -2144,6 +2224,37 @@ int KYTY_SYSV_ABI Getsockname(int s, void* addr, uint32_t* addrlen) {
 		std::memcpy(static_cast<uint8_t*>(addr) + 8, &state.p2p->virtual_port, sizeof(uint16_t));
 	}
 	return result;
+}
+
+int KYTY_SYSV_ABI Getpeername(int s, void* addr, uint32_t* addrlen) {
+	PRINT_NAME();
+
+	LOGF("\t s       = %d\n"
+	     "\t addr    = 0x%016" PRIx64 "\n"
+	     "\t addrlen = 0x%016" PRIx64 "\n",
+	     s, reinterpret_cast<uint64_t>(addr), reinterpret_cast<uint64_t>(addrlen));
+
+	NativeSocket socket = INVALID_NATIVE_SOCKET;
+	SocketSlot   state;
+	if (!GetSocketBackend(s, &socket, &state)) {
+		return -1;
+	}
+	if (addr == nullptr || addrlen == nullptr) {
+		return SetGuestSocketError(Posix::POSIX_EFAULT);
+	}
+	if (state.p2p) {
+		// A virtual-port P2P socket has no fixed peer: the destination packet is
+		// chosen per sendto, exactly as for an unconnected UDP socket on POSIX.
+		return SetGuestSocketError(Posix::POSIX_ENOTCONN);
+	}
+
+	sockaddr_storage host_addr {};
+	SocketLength     host_addrlen = sizeof(host_addr);
+	if (::getpeername(socket, reinterpret_cast<sockaddr*>(&host_addr), &host_addrlen) != 0) {
+		return SetHostSocketError();
+	}
+
+	return ConvertHostSockaddr(&host_addr, host_addrlen, addr, addrlen);
 }
 
 int KYTY_SYSV_ABI Getsockopt(int s, int level, int optname, void* optval, uint32_t* optlen) {
@@ -2286,7 +2397,13 @@ int KYTY_SYSV_ABI Setsockopt(int s, int level, int optname, const void* optval, 
 		    flags < 0 ||
 		    ::fcntl(socket, F_SETFL, enabled ? (flags | O_NONBLOCK) : (flags & ~O_NONBLOCK)) != 0;
 #endif
-		return failed ? SetHostSocketError() : 0;
+		if (failed) {
+			return SetHostSocketError();
+		}
+#if defined(_WIN32)
+		state.transport->nonblocking = enabled;
+#endif
+		return 0;
 	}
 	const bool send_timeout = (level == 0xffff && optname == 0x1105);
 	optname                = ConvertSocketOptionName(level, optname);
@@ -2499,6 +2616,10 @@ int64_t KYTY_SYSV_ABI Recvfrom(int s, void* buf, uint64_t len, int flags, void* 
 	sockaddr_storage host_addr {};
 	SocketLength     host_addrlen = sizeof(host_addr);
 	int64_t          result       = 0;
+	// Winsock rejects MSG_PEEK | MSG_WAITALL with WSAEOPNOTSUPP on datagram sockets, while a
+	// datagram is delivered whole anyway; only stream receives keep the combined flag.
+	const int recv_flags =
+	    transport->type == SOCK_STREAM ? host_flags : (host_flags & ~MSG_WAITALL);
 #if defined(_WIN32)
 	if (state.transport->type == SOCK_STREAM) {
 		if (addr != nullptr &&
@@ -2515,9 +2636,9 @@ int64_t KYTY_SYSV_ABI Recvfrom(int s, void* buf, uint64_t len, int flags, void* 
 	{
 		state.transport.reset();
 		if (addr == nullptr) {
-			result = ::recv(socket, static_cast<char*>(buf), host_len, host_flags);
+			result = ::recv(socket, static_cast<char*>(buf), host_len, recv_flags);
 		} else {
-			result = ::recvfrom(socket, static_cast<char*>(buf), host_len, host_flags,
+			result = ::recvfrom(socket, static_cast<char*>(buf), host_len, recv_flags,
 			                    reinterpret_cast<sockaddr*>(&host_addr), &host_addrlen);
 		}
 	}
@@ -2529,10 +2650,171 @@ int64_t KYTY_SYSV_ABI Recvfrom(int s, void* buf, uint64_t len, int flags, void* 
 #endif
 	if (result < 0) {
 		return SetHostSocketError();
+
 	}
 	if (addr != nullptr && ConvertHostSockaddr(&host_addr, host_addrlen, addr, addrlen) != 0) {
 		return -1;
 	}
+
+	return result;
+}
+
+int64_t KYTY_SYSV_ABI Sendmsg(int s, const void* msg, int flags) {
+	PRINT_NAME();
+
+	LOGF("\t s     = %d\n"
+	     "\t msg   = 0x%016" PRIx64 "\n"
+	     "\t flags = 0x%08" PRIx32 "\n",
+	     s, reinterpret_cast<uint64_t>(msg), static_cast<uint32_t>(flags));
+
+	NativeSocket socket = INVALID_NATIVE_SOCKET;
+	if (msg == nullptr) {
+		return SetGuestSocketError(Posix::POSIX_EFAULT);
+	}
+	// UDPP2P requires protocol framing; the native-only lookup rejects virtual-port
+	// sockets (same behavior as sendto).
+	if (!GetSocketBackend(s, &socket)) {
+		return -1;
+	}
+
+	const auto* guest  = static_cast<const GuestMsghdr*>(msg);
+	uint64_t    total  = 0;
+	if (GuestMsgGatherSize(*guest, &total) != 0) {
+		return -1;
+	}
+	const int host_flags = ConvertMessageFlags(flags);
+	if (host_flags < 0) {
+		return -1;
+	}
+	if (guest->msg_control != nullptr) {
+		// Ancillary control data is not carried by the socket backend.
+		return SetGuestSocketError(Posix::POSIX_EOPNOTSUPP);
+	}
+
+	std::vector<char> buffer(static_cast<size_t>(total));
+	const char*       payload = total != 0 ? buffer.data() : "";
+	uint64_t          written = 0;
+	for (int32_t i = 0; i < guest->msg_iovlen; i++) {
+		if (guest->msg_iov[i].iov_len != 0) {
+			std::memcpy(buffer.data() + written, guest->msg_iov[i].iov_base,
+			            static_cast<size_t>(guest->msg_iov[i].iov_len));
+		}
+		written += guest->msg_iov[i].iov_len;
+	}
+
+	int64_t result = 0;
+	if (guest->msg_name == nullptr) {
+		result = ::send(socket, payload, static_cast<SocketIoLength>(total), host_flags);
+	} else {
+		sockaddr_storage host_addr {};
+		SocketLength     host_addrlen = 0;
+		if (ConvertGuestSockaddr(guest->msg_name, guest->msg_namelen, &host_addr,
+		                         &host_addrlen) != 0) {
+			return -1;
+		}
+		result = ::sendto(socket, payload, static_cast<SocketIoLength>(total), host_flags,
+		                  reinterpret_cast<const sockaddr*>(&host_addr), host_addrlen);
+	}
+	if (result < 0) {
+		return SetHostSocketError();
+	}
+
+	return result;
+}
+
+int64_t KYTY_SYSV_ABI Recvmsg(int s, void* msg, int flags) {
+	PRINT_NAME();
+
+	LOGF("\t s     = %d\n"
+	     "\t msg   = 0x%016" PRIx64 "\n"
+	     "\t flags = 0x%08" PRIx32 "\n",
+	     s, reinterpret_cast<uint64_t>(msg), static_cast<uint32_t>(flags));
+
+	auto* guest = static_cast<GuestMsghdr*>(msg);
+	if (guest == nullptr) {
+		return SetGuestSocketError(Posix::POSIX_EFAULT);
+	}
+
+	NativeSocket                    socket = INVALID_NATIVE_SOCKET;
+	std::shared_ptr<SocketTransport> transport;
+	if (!GetSocketBackend(s, &socket, nullptr, &transport)) {
+		return -1;
+	}
+
+	uint64_t total = 0;
+	if (GuestMsgGatherSize(*guest, &total) != 0) {
+		return -1;
+	}
+	const int host_flags = ConvertMessageFlags(flags);
+	if (host_flags < 0) {
+		return -1;
+	}
+	if (guest->msg_control != nullptr) {
+		// Ancillary control data is not produced by the socket backend.
+		return SetGuestSocketError(Posix::POSIX_EOPNOTSUPP);
+	}
+
+	std::vector<char> buffer(static_cast<size_t>(total));
+	char*             payload = total != 0 ? buffer.data() : nullptr;
+
+	const int recv_flags =
+	    transport->type == SOCK_STREAM ? host_flags : (host_flags & ~MSG_WAITALL);
+
+	sockaddr_storage host_addr {};
+	SocketLength     host_addrlen = sizeof(host_addr);
+	int64_t          result       = 0;
+
+#if defined(_WIN32)
+	if (transport->type == SOCK_STREAM) {
+		if (guest->msg_name != nullptr &&
+		    ::getpeername(socket, reinterpret_cast<sockaddr*>(&host_addr), &host_addrlen) != 0) {
+			return SetHostSocketError();
+		}
+		result = ReceiveStream(*transport, payload, static_cast<int>(total), host_flags,
+		                       (flags & 0x80) != 0);
+		if (result < 0) {
+			return result;
+		}
+	} else
+#endif
+	{
+		transport.reset();
+		if (guest->msg_name == nullptr) {
+			result = ::recv(socket, payload, static_cast<SocketIoLength>(total), recv_flags);
+		} else {
+			result = ::recvfrom(socket, payload, static_cast<SocketIoLength>(total), recv_flags,
+			                    reinterpret_cast<sockaddr*>(&host_addr), &host_addrlen);
+		}
+	}
+#if defined(_WIN32)
+	if (result < 0 && WSAGetLastError() == WSAEMSGSIZE) {
+		// Winsock copied the datagram prefix; POSIX reports its length as success.
+		result = static_cast<int64_t>(total);
+	}
+#endif
+	if (result < 0) {
+		return SetHostSocketError();
+	}
+
+	// Scatter the received bytes across the guest iovecs.
+	uint64_t remaining = static_cast<uint64_t>(result);
+	for (int32_t i = 0; i < guest->msg_iovlen && remaining != 0; i++) {
+		const uint64_t take = std::min<uint64_t>(remaining, guest->msg_iov[i].iov_len);
+		if (take != 0) {
+			std::memcpy(guest->msg_iov[i].iov_base,
+			            buffer.data() + (static_cast<uint64_t>(result) - remaining),
+			            static_cast<size_t>(take));
+		}
+		remaining -= take;
+	}
+
+	if (guest->msg_name != nullptr) {
+		if (ConvertHostSockaddr(&host_addr, host_addrlen, guest->msg_name,
+		                         &guest->msg_namelen) != 0) {
+			return -1;
+		}
+	}
+	guest->msg_flags = 0;
 
 	return result;
 }

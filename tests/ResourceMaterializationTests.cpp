@@ -149,25 +149,8 @@ Libs::Graphics::ShaderRecompiler::IR::Program MixedSamplerProgram() {
   return program;
 }
 
-void TestMappedSrtUsesDirectReaderByDefault() {
-  using namespace Libs::Graphics::ShaderRecompiler::IR;
-  const uint32_t dword = 0x12345678;
-  auto plan = ExtractResourcePlan(SrtProgram(reinterpret_cast<uint64_t>(&dword)));
-  uint32_t specialization_reads = 0;
-  const SrtRuntime runtime{.userdata = &specialization_reads,
-                           .read_specialization_memory =
-                               RejectSpecializationRead};
-  ResourceSnapshot snapshot;
-  ResourceSpecialization specialization;
-  Check(MaterializeResources(plan, runtime, snapshot, specialization),
-        "mapped SRT stage materialization failed");
-  Check(specialization_reads == 0,
-        "ordinary SRT read used the specialization reader");
-  Check(snapshot.flattened_srt.size() == 1 &&
-            snapshot.flattened_srt[0] == dword,
-        "cache rematerialization did not use the direct reader by default");
-}
-
+// Without an ordinary reader the walker reads through the checked reader and never dereferences
+// the guest address itself, so a table the guest never set cannot fault the host.
 void TestNativeNestedSrtRefresh() {
   using namespace Libs::Graphics::ShaderRecompiler::IR;
   std::array<uint32_t, 3> first{0u, 0x12345678u, 0xabcdef01u};

@@ -892,15 +892,10 @@ private:
 				}
 			}
 		}
-		for (auto* block: m_program.blocks) {
-			for (auto& inst: *block) {
-				uint32_t index = 0;
-				if (inst.GetOpcode() == ValueOpcode::LoadAddressU32 &&
-				    ScalarReadMemory(inst, index) != nullptr && inst.Arg(1).Resolve().IsImmediate() &&
-				    ValidateRuntimeValue(m_program, Value(&inst)))
-					CollectScalarRead(Value(&inst), inst.Flags<MemoryFlags>().pc);
-			}
-		}
+		// GPU-side scalar loads (LoadAddressU32) stay off the host scalar-read plan: the
+		// scalar-load residency commit reports their addresses through plan.gpu_scalar_reads
+		// instead, and folding them into the SRT snapshot would snapshot away the payload
+		// of a shader-side atomic (the SAROS b62b494cb2567011 pattern).
 		for (auto* read: m_scalar_reads) {
 			const auto flags = read->Flags<MemoryFlags>();
 			auto& memory = m_program.memory_info[flags.index];

@@ -1669,11 +1669,322 @@ static int KYTY_SYSV_ABI NpSessionSignalingInitialize(void* param) {
 	return 0;
 }
 
+// Guest-verified NIDs Hollow Knight Silksong's PSN.prx plugin imports. Names come
+// from the PS5 3.20 generated stub table (https://github.com/DNNDHH/PS5-3.20_Libs,
+// libSceNpSessionSignaling.c); Kyty has no signaling transport, so every call logs
+// and takes the same offline path as NpSessionSignalingInitialize. Guest signatures
+// are unverified, so emulator-side functions take no parameters and never write
+// presumed-out parameters; callers that zero their own structs observe a clean,
+// offline-neutral state.
+static int KYTY_SYSV_ABI NpSessionSignalingActivateUser() {
+	PRINT_NAME();
+	LOGF("\t no signaling transport, accepted offline\n");
+	return 0;
+}
+
+static int KYTY_SYSV_ABI NpSessionSignalingTerminate() {
+	PRINT_NAME();
+	LOGF("\t no signaling transport\n");
+	return 0;
+}
+
+static int KYTY_SYSV_ABI NpSessionSignalingGetLocalNetInfo() {
+	PRINT_NAME();
+	LOGF("\t no net info available offline (no output written)\n");
+	return 0;
+}
+
+static int KYTY_SYSV_ABI NpSessionSignalingDestroyContext() {
+	PRINT_NAME();
+	return 0;
+}
+
+static int KYTY_SYSV_ABI NpSessionSignalingCreateContext2() {
+	PRINT_NAME();
+	LOGF("\t context creation accepted offline\n");
+	return 0;
+}
+
+static int KYTY_SYSV_ABI NpSessionSignalingDeactivate() {
+	PRINT_NAME();
+	return 0;
+}
+
+static int KYTY_SYSV_ABI NpSessionSignalingGetConnectionStatus() {
+	PRINT_NAME();
+	LOGF("\t no connection available offline (no output written)\n");
+	return 0;
+}
+
+static int KYTY_SYSV_ABI NpSessionSignalingActivateSession() {
+	PRINT_NAME();
+	LOGF("\t no session peers offline\n");
+	return 0;
+}
+
+static int KYTY_SYSV_ABI NpSessionSignalingRequestPrepare() {
+	PRINT_NAME();
+	LOGF("\t prepare accepted offline\n");
+	return 0;
+}
+
+static int KYTY_SYSV_ABI NpSessionSignalingGetConnectionInfo() {
+	PRINT_NAME();
+	LOGF("\t no connection info available offline (no output written)\n");
+	return 0;
+}
+
 LIB_DEFINE(InitNet_1_NpSessionSignaling) {
 	LIB_FUNC("ysmw6J-P8Ak", NpSessionSignalingInitialize);
+	LIB_FUNC("9r7dM3puxMk", NpSessionSignalingActivateUser);
+	LIB_FUNC("CqJuNXo5yiM", NpSessionSignalingTerminate);
+	LIB_FUNC("OTilStjd9L8", NpSessionSignalingGetLocalNetInfo);
+	LIB_FUNC("Z9Q9LzQDXf0", NpSessionSignalingDestroyContext);
+	LIB_FUNC("aBuX0PX-T7I", NpSessionSignalingCreateContext2);
+	LIB_FUNC("cQkBH-pXhF0", NpSessionSignalingDeactivate);
+	LIB_FUNC("n1fn2KFeLDA", NpSessionSignalingGetConnectionStatus);
+	LIB_FUNC("r4XacqHvkn4", NpSessionSignalingActivateSession);
+	LIB_FUNC("r8mVMwlafF8", NpSessionSignalingRequestPrepare);
+	LIB_FUNC("yJw2m6UWDYU", NpSessionSignalingGetConnectionInfo);
 }
 
 } // namespace LibNpSessionSignaling
+
+namespace LibNpEntitlementAccess {
+
+LIB_VERSION("NpEntitlementAccess", 1, "NpEntitlementAccess", 1, 1);
+
+constexpr int      NP_ENTITLEMENT_ACCESS_ERROR_PARAMETER      = -2122514430; /* 0x817D0002 */
+constexpr int      NP_ENTITLEMENT_ACCESS_ERROR_NO_ENTITLEMENT = -2122514425; /* 0x817D0007 */
+constexpr uint32_t NP_ENTITLEMENT_ACCESS_SKU_FLAG_FULL        = 3;
+
+struct NpEntitlementAccessInitParam {
+	char reserved[32];
+};
+
+struct NpEntitlementAccessBootParam {
+	char reserved[32];
+};
+
+struct NpUnifiedEntitlementLabel {
+	char data[17];
+	char padding[3];
+};
+
+struct NpEntitlementAccessAddcontEntitlementInfo {
+	NpUnifiedEntitlementLabel entitlement_label;
+	uint32_t                  package_type;
+	uint32_t                  download_status;
+};
+
+struct NpEntitlementAccessEntitlementKey {
+	uint8_t data[16];
+};
+
+static constexpr NpEntitlementAccessAddcontEntitlementInfo NP_ENTITLEMENT_ACCESS_ADDON_LIST[] = {
+    {{{"85y-je"}, {}}, 3, 4}, // GTA V hash 0xf4315381
+    {{{"5d5c48"}, {}}, 3, 4}, // GTA V hash 0x961c34b0
+    {{{"_mtqu6"}, {}}, 3, 4}, // GTA V hash 0x9cd1bcad
+};
+
+static int KYTY_SYSV_ABI NpEntitlementAccessInitialize(
+    const NpEntitlementAccessInitParam* init_param, NpEntitlementAccessBootParam* boot_param) {
+	PRINT_NAME();
+
+	if (init_param == nullptr || boot_param == nullptr) {
+		return NP_ENTITLEMENT_ACCESS_ERROR_PARAMETER;
+	}
+
+	memset(boot_param, 0, sizeof(*boot_param));
+
+	return 0;
+}
+
+static int KYTY_SYSV_ABI NpEntitlementAccessGetSkuFlag(uint32_t* sku_flag) {
+	PRINT_NAME();
+
+	if (sku_flag == nullptr) {
+		return NP_ENTITLEMENT_ACCESS_ERROR_PARAMETER;
+	}
+
+	*sku_flag = NP_ENTITLEMENT_ACCESS_SKU_FLAG_FULL;
+	return 0;
+}
+
+static int KYTY_SYSV_ABI NpEntitlementAccessGetAddcontEntitlementInfoList(
+    uint32_t service_label, NpEntitlementAccessAddcontEntitlementInfo* list, uint32_t list_num,
+    uint32_t* hit_num) {
+	PRINT_NAME();
+
+	LOGF("\t service_label = %" PRIu32 "\n", service_label);
+	LOGF("\t list          = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(list));
+	LOGF("\t list_num      = %" PRIu32 "\n", list_num);
+	LOGF("\t hit_num       = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(hit_num));
+
+	if (hit_num == nullptr || (list == nullptr && list_num != 0)) {
+		return NP_ENTITLEMENT_ACCESS_ERROR_PARAMETER;
+	}
+
+	*hit_num = static_cast<uint32_t>(sizeof(NP_ENTITLEMENT_ACCESS_ADDON_LIST) /
+	                                 sizeof(NP_ENTITLEMENT_ACCESS_ADDON_LIST[0]));
+
+	if (list != nullptr && list_num != 0) {
+		memset(list, 0, sizeof(*list) * list_num);
+
+		const auto copy_num = (list_num < *hit_num ? list_num : *hit_num);
+		for (uint32_t i = 0; i < copy_num; i++) {
+			list[i] = NP_ENTITLEMENT_ACCESS_ADDON_LIST[i];
+		}
+	}
+
+	return 0;
+}
+
+static int KYTY_SYSV_ABI NpEntitlementAccessGetAddcontEntitlementInfo(
+    uint32_t service_label, const NpUnifiedEntitlementLabel* entitlement_label,
+    NpEntitlementAccessAddcontEntitlementInfo* info) {
+	PRINT_NAME();
+
+	LOGF("\t service_label     = %" PRIu32 "\n", service_label);
+	LOGF("\t entitlement_label = 0x%016" PRIx64 "\n",
+	     reinterpret_cast<uint64_t>(entitlement_label));
+	LOGF("\t info              = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(info));
+
+	if (entitlement_label == nullptr || info == nullptr) {
+		return NP_ENTITLEMENT_ACCESS_ERROR_PARAMETER;
+	}
+
+	memset(info, 0, sizeof(*info));
+
+	for (const auto& entitlement: NP_ENTITLEMENT_ACCESS_ADDON_LIST) {
+		if (strncmp(entitlement_label->data, entitlement.entitlement_label.data,
+		            sizeof(entitlement_label->data)) == 0) {
+			*info = entitlement;
+			return 0;
+		}
+	}
+
+	return NP_ENTITLEMENT_ACCESS_ERROR_NO_ENTITLEMENT;
+}
+
+static int KYTY_SYSV_ABI NpEntitlementAccessGetEntitlementKey(
+    uint32_t service_label, const NpUnifiedEntitlementLabel* entitlement_label,
+    NpEntitlementAccessEntitlementKey* key) {
+	PRINT_NAME();
+
+	LOGF("\t service_label     = %" PRIu32 "\n"
+	     "\t entitlement_label = 0x%016" PRIx64 "\n"
+	     "\t key               = 0x%016" PRIx64 "\n",
+	     service_label, reinterpret_cast<uint64_t>(entitlement_label),
+	     reinterpret_cast<uint64_t>(key));
+
+	if (entitlement_label == nullptr || key == nullptr) {
+		return NP_ENTITLEMENT_ACCESS_ERROR_PARAMETER;
+	}
+
+	return NP_ENTITLEMENT_ACCESS_ERROR_NO_ENTITLEMENT;
+}
+
+// Guest-verified NIDs Hollow Knight Silksong's PSN.prx plugin imports. Names come
+// from the PS5 3.20 generated stub table (https://github.com/DNNDHH/PS5-3.20_Libs,
+// libSceNpEntitlementAccess.c). Offline path matches the block's own
+// GetEntitlementKey precedent: request/poll always complete with
+// ERROR_NO_ENTITLEMENT because there is no PSN backend; lifecycle acks OK. Guest
+// signatures are unverified, so these take no parameters and never write presumed
+// out-parameters.
+static int KYTY_SYSV_ABI EntitlementOfflineNoEntitlement() {
+	PRINT_NAME();
+	LOGF("\t no PSN backend, reporting no entitlement\n");
+	return NP_ENTITLEMENT_ACCESS_ERROR_NO_ENTITLEMENT;
+}
+
+static int KYTY_SYSV_ABI EntitlementOfflineAck() {
+	PRINT_NAME();
+	return 0;
+}
+
+static int KYTY_SYSV_ABI NpEntitlementAccessPollConsumeEntitlement() {
+	return EntitlementOfflineNoEntitlement();
+}
+
+static int KYTY_SYSV_ABI NpEntitlementAccessRequestConsumeServiceEntitlement() {
+	return EntitlementOfflineNoEntitlement();
+}
+
+static int KYTY_SYSV_ABI NpEntitlementAccessAbortRequest() {
+	return EntitlementOfflineAck();
+}
+
+static int KYTY_SYSV_ABI NpEntitlementAccessGenerateTransactionId() {
+	// Transaction ids only matter to a PSN backend; offline they are unused.
+	return EntitlementOfflineAck();
+}
+
+static int KYTY_SYSV_ABI NpEntitlementAccessPollUnifiedEntitlementInfo() {
+	return EntitlementOfflineNoEntitlement();
+}
+
+static int KYTY_SYSV_ABI NpEntitlementAccessRequestServiceEntitlementInfo() {
+	return EntitlementOfflineNoEntitlement();
+}
+
+static int KYTY_SYSV_ABI NpEntitlementAccessPollServiceEntitlementInfo() {
+	return EntitlementOfflineNoEntitlement();
+}
+
+static int KYTY_SYSV_ABI NpEntitlementAccessDeleteRequest() {
+	return EntitlementOfflineAck();
+}
+
+static int KYTY_SYSV_ABI NpEntitlementAccessPollServiceEntitlementInfoList() {
+	return EntitlementOfflineNoEntitlement();
+}
+
+static int KYTY_SYSV_ABI NpEntitlementAccessRequestServiceEntitlementInfoList() {
+	return EntitlementOfflineNoEntitlement();
+}
+
+static int KYTY_SYSV_ABI NpEntitlementAccessRequestConsumeUnifiedEntitlement() {
+	return EntitlementOfflineNoEntitlement();
+}
+
+static int KYTY_SYSV_ABI NpEntitlementAccessRequestUnifiedEntitlementInfo() {
+	return EntitlementOfflineNoEntitlement();
+}
+
+static int KYTY_SYSV_ABI NpEntitlementAccessPollUnifiedEntitlementInfoList() {
+	return EntitlementOfflineNoEntitlement();
+}
+
+static int KYTY_SYSV_ABI NpEntitlementAccessRequestUnifiedEntitlementInfoList() {
+	return EntitlementOfflineNoEntitlement();
+}
+
+LIB_DEFINE(InitNet_1_NpEntitlementAccess) {
+	LIB_FUNC("jO8DM8oyego", LibNpEntitlementAccess::NpEntitlementAccessInitialize);
+	LIB_FUNC("lPDO62PpJIA", LibNpEntitlementAccess::NpEntitlementAccessGetSkuFlag);
+	LIB_FUNC("TFyU+KFBv54",
+	         LibNpEntitlementAccess::NpEntitlementAccessGetAddcontEntitlementInfoList);
+	LIB_FUNC("xddD23+8TfQ", LibNpEntitlementAccess::NpEntitlementAccessGetAddcontEntitlementInfo);
+	LIB_FUNC("5LiMEPuW0DQ", LibNpEntitlementAccess::NpEntitlementAccessGetEntitlementKey);
+	// The plugin's request/poll surface, all offline-neutral.
+	LIB_FUNC("69u+XqsoNd0", NpEntitlementAccessPollConsumeEntitlement);
+	LIB_FUNC("Aqae0TjLvQU", NpEntitlementAccessRequestConsumeServiceEntitlement);
+	LIB_FUNC("HFcQl9TMcFQ", NpEntitlementAccessAbortRequest);
+	LIB_FUNC("IQtb-TaIjSM", NpEntitlementAccessGenerateTransactionId);
+	LIB_FUNC("M4XlLFnzQaQ", NpEntitlementAccessPollUnifiedEntitlementInfo);
+	LIB_FUNC("M8icY9OwkKs", NpEntitlementAccessRequestServiceEntitlementInfo);
+	LIB_FUNC("ShGBFuoSSsQ", NpEntitlementAccessPollServiceEntitlementInfo);
+	LIB_FUNC("Z0eQj8m7XA8", NpEntitlementAccessDeleteRequest);
+	LIB_FUNC("aFv8qms6XTM", NpEntitlementAccessPollServiceEntitlementInfoList);
+	LIB_FUNC("brbRxzr7qyI", NpEntitlementAccessRequestServiceEntitlementInfoList);
+	LIB_FUNC("eOxGbG3sPb0", NpEntitlementAccessRequestConsumeUnifiedEntitlement);
+	LIB_FUNC("jautSRs4OdQ", NpEntitlementAccessRequestUnifiedEntitlementInfo);
+	LIB_FUNC("nAEqawEZG5s", NpEntitlementAccessPollUnifiedEntitlementInfoList);
+	LIB_FUNC("uCZf2L27th8", NpEntitlementAccessRequestUnifiedEntitlementInfoList);
+}
+
+} // namespace LibNpEntitlementAccess
 
 namespace LibNpAuth {
 
@@ -2671,24 +2982,10 @@ LIB_DEFINE(InitPlatform_1_Remoteplay) {
 
 namespace LibWebBrowserDialog {
 
-LIB_VERSION("WebBrowserDialog", 1, "WebBrowserDialog", 1, 1);
+// WebBrowserDialogInitialize ("jqb7HntFQFc") and WebBrowserDialogTerminate ("ocHtyBwHfys")
+// are registered by the full lifecycle implementation in libWebBrowserDialog.cpp.
 
-static int KYTY_SYSV_ABI WebBrowserDialogInitialize() {
-	PRINT_NAME();
-
-	return 0;
-}
-
-static int KYTY_SYSV_ABI WebBrowserDialogTerminate() {
-	PRINT_NAME();
-
-	return 0;
-}
-
-LIB_DEFINE(InitPlatform_1_WebBrowserDialog) {
-	LIB_FUNC("jqb7HntFQFc", LibWebBrowserDialog::WebBrowserDialogInitialize);
-	LIB_FUNC("ocHtyBwHfys", LibWebBrowserDialog::WebBrowserDialogTerminate);
-}
+LIB_DEFINE(InitPlatform_1_WebBrowserDialog) {}
 
 } // namespace LibWebBrowserDialog
 

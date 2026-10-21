@@ -203,6 +203,13 @@ static void VulkanFindPhysicalDevice(vk::Instance instance, vk::SurfaceKHR surfa
 			continue;
 		}
 
+		const auto available_extensions = EnumerateVulkan<vk::ExtensionProperties>(
+		    "vkEnumerateDeviceExtensionProperties",
+		    [&](uint32_t* count, vk::ExtensionProperties* values) {
+			    return device.enumerateDeviceExtensionProperties(nullptr, count, values);
+		    });
+		EXIT_NOT_IMPLEMENTED(available_extensions.empty());
+
 		vk::PhysicalDeviceFeatures2 device_features2 {};
 
 		vk::PhysicalDeviceVulkan13Features features13 {};
@@ -220,15 +227,16 @@ static void VulkanFindPhysicalDevice(vk::Instance instance, vk::SurfaceKHR surfa
 		vk::PhysicalDeviceVulkan12Features features12 {};
 		vk::PhysicalDeviceVulkan11Features features11 {};
 		vk::PhysicalDeviceRobustness2FeaturesEXT robustness2 {};
-#if defined(__APPLE__)
-		features12.pNext = &depth_clip_control;
-#else
 		vk::PhysicalDeviceFragmentShaderBarycentricFeaturesKHR fragment_barycentric {};
-		fragment_barycentric.pNext = &depth_clip_control;
-		features12.pNext           = &fragment_barycentric;
-#endif
-		robustness2.pNext      = features12.pNext;
-		features11.pNext       = &robustness2;
+		const bool has_barycentric_ext =
+		    HasExtension(available_extensions, VK_KHR_FRAGMENT_SHADER_BARYCENTRIC_EXTENSION_NAME);
+		if (has_barycentric_ext) {
+			fragment_barycentric.pNext = &depth_clip_control;
+			robustness2.pNext          = &fragment_barycentric;
+		} else {
+			robustness2.pNext = &depth_clip_control;
+		}
+		features11.pNext = &robustness2;
 		features12.pNext       = &features11;
 		features13.pNext       = &features12;
 		device_features2.pNext = &features13;
@@ -268,6 +276,8 @@ static void VulkanFindPhysicalDevice(vk::Instance instance, vk::SurfaceKHR surfa
 #endif
 #if !defined(__APPLE__)
 		check_feature(device_features2.features.depthClamp, "depthClamp");
+		// fragmentShaderBarycentric is optional: GPUs without native fragment barycentrics (e.g. RDNA 1 or MoltenVK)
+		// can still run games that do not rely on custom barycentric interpolation.
 #endif
 
 		check_feature(features12.samplerMirrorClampToEdge, "samplerMirrorClampToEdge",
@@ -330,13 +340,6 @@ static void VulkanFindPhysicalDevice(vk::Instance instance, vk::SurfaceKHR surfa
 		check_feature(device_features2.features.tessellationShader, "tessellationShader");
 
 		if (!skip_device) {
-			auto available_extensions = EnumerateVulkan<vk::ExtensionProperties>(
-			    "vkEnumerateDeviceExtensionProperties",
-			    [&](uint32_t* count, vk::ExtensionProperties* values) {
-				    return device.enumerateDeviceExtensionProperties(nullptr, count, values);
-			    });
-			EXIT_NOT_IMPLEMENTED(available_extensions.empty());
-
 			for (const char* ext: device_extensions) {
 				if (!HasExtension(available_extensions, ext)) {
 					reject(fmt::format("{} is not supported", ext));

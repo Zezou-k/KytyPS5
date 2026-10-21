@@ -18,6 +18,12 @@ namespace Libs::Graphics {
 
 struct ShaderStageRuntime;
 
+struct SamplerColorMode {
+	bool valid           = false;
+	bool force_srgb      = false;
+	bool disable_degamma = false;
+};
+
 struct TextureBinding {
 	ImageId                    image_id;
 	vk::ImageView              image_view = nullptr;

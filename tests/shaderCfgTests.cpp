@@ -3307,8 +3307,8 @@ void TestNewShaderRecompilerMoreAluFamilies() {
         "SPIR-V binary does not contain OpFNegate");
   Check(SpirvContainsOpcode(result.spirv, 12),
         "SPIR-V binary does not contain OpExtInst");
-  Check(SpirvContainsExtInst(result.spirv, 58),
-        "SPIR-V binary does not contain GLSL.std.450 PackHalf2x16");
+  Check(SpirvContainsOpcode(result.spirv, 196),
+        "SPIR-V binary does not contain the bitwise RNE F16 pack");
   Check(SpirvContainsExtInst(result.spirv, 62),
         "SPIR-V binary does not contain GLSL.std.450 UnpackHalf2x16");
   Check(SpirvContainsExtInst(result.spirv, 50),
@@ -3574,8 +3574,8 @@ void TestNewShaderRecompilerVop3pPackedF16() {
         "accumulator");
   Check(SpirvContainsExtInst(result.spirv, 62),
         "SPIR-V binary does not contain GLSL.std.450 UnpackHalf2x16 for VOP3P");
-  Check(SpirvContainsExtInst(result.spirv, 58),
-        "SPIR-V binary does not contain GLSL.std.450 PackHalf2x16 for VOP3P");
+  Check(SpirvContainsOpcode(result.spirv, 196),
+        "SPIR-V binary does not contain the bitwise RNE F16 pack for VOP3P");
   Check(SpirvContainsExtInst(result.spirv, 50),
         "SPIR-V binary does not contain GLSL.std.450 Fma for VOP3P");
   Check(
@@ -3663,8 +3663,8 @@ void TestNewShaderRecompilerStagedShaderOps() {
         "SPIR-V binary does not contain OpNot for S_BITSET0_B32");
   Check(SpirvContainsExtInst(result.spirv, 50),
         "SPIR-V binary does not contain GLSL.std.450 Fma for VOP2 F16 FMA ops");
-  Check(SpirvContainsExtInst(result.spirv, 58),
-        "SPIR-V binary does not contain GLSL.std.450 PackHalf2x16 for VOP2 F16 "
+  Check(SpirvContainsOpcode(result.spirv, 196),
+        "SPIR-V binary does not contain the bitwise RNE F16 pack for VOP2 F16 "
         "FMA ops");
   Check(SpirvContainsExtInst(result.spirv, 62),
         "SPIR-V binary does not contain GLSL.std.450 UnpackHalf2x16 for VOP2 "
@@ -7436,10 +7436,9 @@ void TestNewShaderRecompilerFormattedStoreUsesRuntimeArrayLengthOnly() {
   user_data[3] = static_cast<uint32_t>(Prospero::BufferFormat::k16_16_16_16Float) << 12u;
   options.user_data = user_data;
   result = RecompileForTest(shader, options);
-  const auto half_source = DisassembleSpirvBinary(result.spirv);
-  Check(half_source.find("PackHalf2x16") == std::string::npos &&
-            half_source.find("%uint_31744") != std::string::npos,
-        "formatted half-float store did not encode F32 as F16");
+  Check((DisassembleSpirvBinary(result.spirv).find("OpShiftLeftLogical") !=
+         std::string::npos),
+        "formatted half-float store did not convert F32 to F16");
   CheckSpirvBinaryValidates(result.spirv);
 }
 
@@ -14935,6 +14934,142 @@ void TestUniformSelectedDescriptorLoadAddress() {
   }
 }
 
+void TestNativeScalarAtomicPayloadStaysOnGpu() {
+  using namespace ShaderRecompiler::IR;
+  // Exact final block from SAROS b62b494cb2567011: read a mutable flag,
+  // atomically update that address, then test the loaded flag before S_TRAP.
+  const uint32_t shader[] = {
+      0x7e0002ffu, 0x00100000u, 0x7e020280u, 0xf4040100u,
+      0xfa000018u, 0xbf8cc07fu, 0x8801ff05u, 0x01000000u,
+      0xbe800304u, 0xbe820381u, 0xbe8303ffu, 0x00016204u,
+      0xf4001a82u, 0xfa000018u, 0xe1680018u, 0x80000000u,
+      0xbf8cc07fu, 0xbf0d846au, 0xbf840001u, 0xbf920001u,
+      0xbf810000u,
+  };
+  const std::array<uint32_t, 2> user_data{0x1000u, 0u};
+  auto options = MakeCompileOptions(ShaderType::Compute);
+  options.user_data = user_data;
+  auto translated = ShaderRecompiler::TranslateProgram(shader, options);
+  const auto &program = translated.program;
+  const Inst *payload = nullptr;
+  for (const auto *block : program.blocks) {
+    for (const auto &inst : *block) {
+      if (inst.GetOpcode() == ValueOpcode::LoadAddressU32 &&
+          program.memory_info[inst.Flags<MemoryFlags>().index].kind == ResourceKind::ScalarAddress)
+        payload = &inst;
+    }
+  }
+  Check(payload != nullptr && payload->Parent() != nullptr &&
+            !program.memory_info[payload->Flags<MemoryFlags>().index].planning_only &&
+            program.info.uses_dma && program.info.buffers.size() == 1 &&
+            program.info.buffers[0].atomic,
+        "native scalar payload was replaced by a host snapshot before its atomic write");
+  auto plan = ExtractResourcePlan(program);
+  Check(plan.srt_reads.size() == 2 && plan.control_flow.empty() &&
+            !plan.capture_specialization_reads,
+        "terminal native shader assertion entered resource planning");
+  struct Reads { uint32_t descriptors = 0; uint32_t payload = 0; } reads;
+  const auto read = +[](void *data, uint64_t address, std::span<uint32_t> words) {
+    auto &reads = *static_cast<Reads *>(data);
+    if (address == 0x2018u) { ++reads.payload; return false; }
+    if (words.size() != 1 || (address != 0x1018u && address != 0x101cu)) return false;
+    ++reads.descriptors;
+    words[0] = address == 0x1018u ? 0x2000u : 0u;
+    return true;
+  };
+  const SrtRuntime runtime{.user_data = user_data, .read_memory = read,
+                           .userdata = &reads, .read_specialization_memory = read};
+  ResourceSnapshot snapshot;
+  ResourceSpecialization specialization;
+  Check(MaterializeResources(plan, runtime, snapshot, specialization) &&
+            reads.descriptors == 2 && reads.payload == 0 &&
+            snapshot.specialization_reads.empty() && snapshot.buffers[0].dwords[0] == 0x2000u,
+        "native resource materialization read the mutable flag or lost its atomic descriptor");
+  using Ranges = std::vector<std::pair<uint64_t, uint64_t>>;
+  Check(snapshot.gpu_scalar_reads == Ranges{{0x2018u, 4u}},
+        "native scalar payload address was not reported for residency");
+}
+
+std::array<uint32_t, 12> GpuScalarReadUserData() {
+  std::array<uint32_t, 12> data{0x3000u}; // s[0:1]: table pointer
+  data[8] = 0x5000u;                      // s[8:11]: output buffer
+  data[10] = 16u;
+  data[11] = 3u << 28u;
+  return data;
+}
+
+void TestGpuScalarReadSkipsUnreachedBlock() {
+  using namespace ShaderRecompiler::IR;
+  // The store makes the host plan decide this branch. A load in the skipped block needs no
+  // buffer, and the host reads no memory for either outcome.
+  const uint32_t shader[] = {
+      EncodeSopc(0x06, 2, 0x80),                           // s_cmp_eq_u32 s2, 0
+      EncodeSopp(0x05, 6),                                 // s_cbranch_scc1 end
+      EncodeSmem0(0x00, 4, 0), 0xfa000010u,                // s_load_dword s4, s[0:1], 0x10
+      EncodeSopp(0x0c, 0xc07f),                            // s_waitcnt lgkmcnt(0)
+      EncodeVop1(0x01, 0, 4),                              // v_mov_b32 v0, s4
+      EncodeMubuf0(0x1c, 0, false), EncodeMubuf1(0, 2, 0), // buffer_store_dword v0, off, s[8:11], 0
+      0xbf810000u,                                         // end: s_endpgm
+  };
+  auto user_data = GpuScalarReadUserData();
+  auto options = MakeCompileOptions(ShaderType::Compute);
+  options.user_data = user_data;
+  auto translated = ShaderRecompiler::TranslateProgram(shader, options);
+  auto plan = ExtractResourcePlan(translated.program);
+  Check(!plan.control_flow.empty() && plan.gpu_scalar_reads.size() == 1,
+        "the host plan does not decide the branch around the scalar load");
+  uint32_t reads = 0;
+  const auto read = +[](void *data, uint64_t, std::span<uint32_t>) {
+    ++*static_cast<uint32_t *>(data);
+    return false;
+  };
+  using Ranges = std::vector<std::pair<uint64_t, uint64_t>>;
+  for (const uint32_t flag : {0u, 1u}) {
+    user_data[2] = flag;
+    const SrtRuntime runtime{.user_data = user_data, .read_memory = read, .userdata = &reads,
+                             .read_specialization_memory = read};
+    ResourceSnapshot snapshot;
+    ResourceSpecialization specialization;
+    Check(MaterializeResources(plan, runtime, snapshot, specialization) && reads == 0 &&
+              snapshot.gpu_scalar_reads == (flag != 0u ? Ranges{{0x3010u, 4u}} : Ranges{}),
+          "a scalar load was reported for a block the host plan skips, or not for a taken one");
+  }
+}
+
+void TestGpuScalarReadNeedsHostAddress() {
+  using namespace ShaderRecompiler::IR;
+  // The second load is offset by the first one's result, which only the GPU reads.
+  const uint32_t shader[] = {
+      EncodeSmem0(0x00, 4, 0), 0x0c000000u, // s_load_dword s4, s[0:1], s6
+      EncodeSopp(0x0c, 0xc07f),
+      EncodeSmem0(0x00, 5, 0), 0x08000000u, // s_load_dword s5, s[0:1], s4
+      EncodeSopp(0x0c, 0xc07f),
+      EncodeVop1(0x01, 0, 5),
+      EncodeMubuf0(0x1c, 0, false), EncodeMubuf1(0, 2, 0),
+      0xbf810000u,
+  };
+  auto user_data = GpuScalarReadUserData();
+  user_data[6] = 0x20u;
+  auto options = MakeCompileOptions(ShaderType::Compute);
+  options.user_data = user_data;
+  auto translated = ShaderRecompiler::TranslateProgram(shader, options);
+  auto plan = ExtractResourcePlan(translated.program);
+  uint32_t reads = 0;
+  const auto read = +[](void *data, uint64_t, std::span<uint32_t> words) {
+    ++*static_cast<uint32_t *>(data);
+    std::ranges::fill(words, 0x40u);
+    return true;
+  };
+  const SrtRuntime runtime{.user_data = user_data, .read_memory = read, .userdata = &reads,
+                           .read_specialization_memory = read};
+  ResourceSnapshot snapshot;
+  ResourceSpecialization specialization;
+  using Ranges = std::vector<std::pair<uint64_t, uint64_t>>;
+  Check(MaterializeResources(plan, runtime, snapshot, specialization) && reads == 0 &&
+            snapshot.gpu_scalar_reads == Ranges{{0x3020u, 4u}},
+        "a scalar load addressed by another GPU-side load was evaluated on the host");
+}
+
 void TestBoundedScalarMaterialImageKeys() {
   using namespace ShaderRecompiler::IR;
   // SAROS 9fba2edffc549531: min(header count,64), scalar rows of 160 bytes,
@@ -16816,6 +16951,9 @@ int main() {
   TestGpuProducedWritableDescriptor();
   TestUniformSelectedWritableDescriptor();
   TestUniformSelectedDescriptorLoadAddress();
+  TestNativeScalarAtomicPayloadStaysOnGpu();
+  TestGpuScalarReadSkipsUnreachedBlock();
+  TestGpuScalarReadNeedsHostAddress();
   TestBoundedScalarMaterialImageKeys();
   TestImmutableDescriptorPredicate();
   TestTypedDescriptorRealCarryAndScalarLoads();

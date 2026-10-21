@@ -74,6 +74,9 @@ int64_t KYTY_SYSV_ABI Sendto(int s, const void* buf, uint64_t len, int flags, co
 int64_t KYTY_SYSV_ABI Recv(int s, void* buf, uint64_t len, int flags);
 int64_t KYTY_SYSV_ABI Recvfrom(int s, void* buf, uint64_t len, int flags, void* addr,
                                uint32_t* addrlen);
+int KYTY_SYSV_ABI         Getpeername(int s, void* addr, uint32_t* addrlen);
+int64_t KYTY_SYSV_ABI Sendmsg(int s, const void* msg, int flags);
+int64_t KYTY_SYSV_ABI Recvmsg(int s, void* msg, int flags);
 
 } // namespace Net
 

@@ -1684,6 +1684,12 @@ CompiledShader CompileCase(const TestCase &test, u32 host_subgroup_size = 64) {
   }
 
   auto translated = ShaderRecompiler::TranslateProgram(test.code, options);
+  if (const char* dump_path = std::getenv("KYTY_IR_DUMP_PATH")) {
+    if (auto* f = std::fopen(dump_path, "w")) {
+      std::fputs(ShaderRecompiler::IR::ProgramToString(translated.program).c_str(), f);
+      std::fclose(f);
+    }
+  }
   auto resource_plan =
       ShaderRecompiler::IR::ExtractResourcePlan(translated.program);
   ShaderRecompiler::IR::ResourceSnapshot resources;
@@ -1703,6 +1709,12 @@ CompiledShader CompileCase(const TestCase &test, u32 host_subgroup_size = 64) {
           "translated resources could not be materialized");
   auto result = ShaderRecompiler::CompileProgram(
       std::move(translated), options, specialization);
+  if (const char* spirv_path = std::getenv("KYTY_SPIRV_DUMP_PATH")) {
+    if (auto* f = std::fopen(spirv_path, "wb")) {
+      std::fwrite(result.spirv.data(), sizeof(u32), result.spirv.size(), f);
+      std::fclose(f);
+    }
+  }
   for (const auto &[text, expected] : test.decoded_counts) {
     const auto actual = CountText(result.decoded_dump, text);
     Require(test.name, "decoded RDNA2", actual == expected,
@@ -5369,6 +5381,127 @@ public:
               "staged BDA updates were stale, overwritten before their read, or incompletely flushed");
     }
     DestroyBuffer(&readback);
+    std::printf("[gpu]     %-32s ok\n", name);
+  }
+
+  void CheckScalarLoadResidency() {
+    constexpr const char *name = "ScalarLoadResidency";
+    constexpr uintptr_t base = 0x0000000204900000ull;
+    constexpr uint64_t allocation_size = 0x10000;
+    constexpr uint64_t output = base + 0x100;
+    // No descriptor of the dispatch covers this page, so it has no buffer yet.
+    constexpr uint64_t table = base + 2 * BufferCache::CACHING_PAGESIZE + 0x40;
+    // God of War Ragnarok CS 0x5c046e9ef798f2bc loads its loop bound like this (into s[6:7]).
+    // A page without a buffer read zero there, and the bound became 0xffffffff.
+    std::vector<u32> code{EncodeSmem0(0x01, 8, 0), EncodeSmem1(8, 125), // s_load_dwordx2 s[8:9], s[0:1], 0x8
+                          EncodeSopp(0x0c, 0xc07f),
+                          EncodeVop1(0x01, 1, 8), EncodeVop1(0x01, 2, 9),
+                          EncodeMubuf0(0x1cu, 0, false, false), EncodeMubuf1(1, 1, 0),
+                          EncodeMubuf0(0x1cu, 4, false, false), EncodeMubuf1(2, 1, 0)};
+    AppendEnd(&code);
+    ShaderMapUserData(reinterpret_cast<uint64_t>(code.data()),
+        {.type = Prospero::ShaderBinaryType::kCs,
+         .code_size_bytes = static_cast<uint32_t>(code.size() * sizeof(u32))});
+
+    EnsureRuntimeContext();
+    int64_t direct_offset = -1;
+    Require(name, "direct allocation",
+            Libs::LibKernel::Memory::KernelAllocateDirectMemory(
+                0, Libs::LibKernel::Memory::KernelGetDirectMemorySize(),
+                allocation_size, allocation_size, 0, &direct_offset) == 0,
+            "scalar table allocation failed");
+    void *mapped = reinterpret_cast<void *>(base);
+    Require(name, "direct mapping",
+            Libs::LibKernel::Memory::KernelMapDirectMemory(
+                &mapped, allocation_size, 0x3, 0x10, direct_offset, allocation_size) == 0 &&
+                mapped == reinterpret_cast<void *>(base),
+            "scalar table mapping failed");
+    std::memset(mapped, 0, allocation_size);
+    const std::array<u32, 4> values{0x11111111u, 0x22222222u, 3u, 2u};
+    std::memcpy(reinterpret_cast<void *>(table), values.data(), sizeof(values));
+
+    RenderContext context(m_runtime_context);
+    context.InitializeGpu(nullptr);
+    LibKernel::Memory::InstallGpuResources(&context);
+    context.GetGpu().SendCommandSync([&] {
+      using ShaderRecompiler::IR::DescriptorBindingKind;
+      CommandProcessor processor(context, 0);
+      processor.BufferInit();
+      auto &scheduler = context.GetCommandScheduler();
+      auto &cache = context.GetBufferCache();
+      auto &shaders = processor.GetShCtx();
+      context.MapMemory(base, allocation_size);
+      shaders.SetCsShader({.data_addr = reinterpret_cast<uint64_t>(code.data()),
+                           .num_thread_x = 1, .num_thread_y = 1, .num_thread_z = 1,
+                           .wave_size = 64, .user_sgpr = 8});
+      shaders.SetCsUserSgpr(0, static_cast<u32>(table), HW::UserSgprType::Unknown);
+      shaders.SetCsUserSgpr(1, static_cast<u32>(table >> 32u), HW::UserSgprType::Unknown);
+      ShaderBufferResource descriptor{};
+      descriptor.UpdateAddress48(output);
+      descriptor.fields[2] = 2u * sizeof(u32);
+      descriptor.fields[3] = DstSel(4, 5, 6, 7) |
+          (static_cast<u32>(Prospero::BufferFormat::k32UInt) << 12u);
+      for (u32 i = 0; i < 4; i++) {
+        shaders.SetCsUserSgpr(4 + i, descriptor.fields[i], HW::UserSgprType::Unknown);
+      }
+      ShaderComputeInputInfo input{};
+      (void)context.GetPipelineCache().GetComputeProgram(
+          shaders.GetCs(), processor.GetCtx().GetShaderRegisters(), input);
+      const auto &counts = input.stage.program->bindings.descriptor_counts;
+      Require(name, "GPU-side scalar load",
+              counts[static_cast<size_t>(DescriptorBindingKind::FlattenedSrt)] == 0 &&
+                  counts[static_cast<size_t>(DescriptorBindingKind::BdaPagetable)] != 0 &&
+                  !BufferCacheTestAccess::PageOwner(cache, table),
+              "the table load is no longer a BDA read from a page without a buffer");
+
+      processor.DispatchDirect(1, 1, 1, 0x41u);
+      cache.ReadMemory(output, 2u * sizeof(u32));
+      std::array<u32, 2> actual{};
+      Require(name, "output readback",
+              LibKernel::Memory::TryReadBacking(output, actual.data(), sizeof(actual)),
+              "scalar load output could not be read back");
+      Require(name, "first dispatch reads the table", actual[0] == 3u && actual[1] == 2u,
+              "expected 0x00000003/0x00000002, got " + Hex(actual[0]) + "/" + Hex(actual[1]));
+      context.UnmapMemory(base, allocation_size);
+      scheduler.Finish();
+    });
+    LibKernel::Memory::InstallGpuResources(nullptr);
+    context.ShutdownGpu();
+    Require(name, "unmap direct backing",
+            Libs::LibKernel::Memory::KernelMunmap(base, allocation_size) == 0,
+            "scalar table mapping release failed");
+    Require(name, "release direct backing",
+            Libs::LibKernel::Memory::KernelReleaseDirectMemory(direct_offset,
+                                                               allocation_size) == 0,
+            "scalar table allocation release failed");
+    std::printf("[gpu]     %-32s ok\n", name);
+  }
+
+  void CheckBdaReadBuffers() {
+    constexpr const char *name = "BdaReadBuffers";
+    constexpr uint64_t base = 0x0000000204a00000ull;
+    constexpr uint64_t page = BufferCache::CACHING_PAGESIZE;
+    EnsureRuntimeContext();
+    RenderContext context(m_runtime_context);
+    auto &scheduler = context.GetCommandScheduler();
+    HW::Context registers{};
+    HW::UserConfig user_config{};
+    HW::Shader shaders{};
+    scheduler.Begin(registers, user_config, shaders);
+    auto &cache = context.GetBufferCache();
+    context.MapMemory(base, 3 * page);
+    const auto held = cache.FindBuffer(base, 2 * page);
+    // One read crosses from the held pages into an empty one, the other leaves the mapping.
+    const std::array<std::pair<uint64_t, uint64_t>, 2> reads{
+        {{base + 2 * page - 4, 8}, {base + 3 * page - 4, 8}}};
+    context.FindBdaBuffers(reads);
+    const auto added = BufferCacheTestAccess::PageOwner(cache, base + 2 * page);
+    Require(name, "page owners",
+            BufferCacheTestAccess::PageOwner(cache, base) == held &&
+                BufferCacheTestAccess::PageOwner(cache, base + page) == held && added &&
+                added != held && !BufferCacheTestAccess::PageOwner(cache, base + 3 * page),
+            "BDA reads joined a held buffer or created one outside the mapped range");
+    scheduler.Finish();
     std::printf("[gpu]     %-32s ok\n", name);
   }
 
@@ -26824,7 +26957,10 @@ TestCase VectorFractF16CapturedAndEdges() {
                   O::V_AND_B32, O::BUFFER_STORE_DWORD, O::S_ENDPGM};
   test.decoded_counts = {{"V_FRACT_F16 v9, v7", inputs.size()}};
   test.ir_counts = {{" = FPFract32 ", inputs.size()}};
-  test.required_spirv = {" Fract ", " UnpackHalf2x16 "};
+  // FPFract32 lowers as x - floor(x); GLSLstd450Fract is out of the path (same
+  // Waldo miscompile as the F64 one: tiny negative inputs lose the floor).
+  // Half-writeback is the bitwise RNE pack: OpShiftLeft_logical to join lanes.
+  test.required_spirv = {"Floor", "OpFSub", "OpShiftLeftLogical", " UnpackHalf2x16 "};
   test.forbidden_spirv = {"OpCapability Float16"};
   return test;
 }
@@ -26867,7 +27003,8 @@ TestCase VectorFractF16Modifiers() {
                  O::BUFFER_STORE_DWORD, O::S_ENDPGM}};
   test.decoded_counts = {{"V_FRACT_F16", 10}};
   test.ir_counts = {{" = FPFract32 ", 10}};
-  test.required_spirv = {" Fract "};
+  // FPFract32 lowers as x - floor(x); see VectorFractF16CapturedAndEdges.
+  test.required_spirv = {"Floor", "OpFSub", "OpShiftLeftLogical"};
   return test;
 }
 
@@ -26905,7 +27042,7 @@ TestCase VectorCosF16CapturedSdwaAndEdges() {
                           "v4.sdwa(sel=5,sext=0)",
                           1}};
   test.ir_counts = {{" = FPCos ", 6}};
-  test.required_spirv = {" Fract ", " Cos "};
+  test.required_spirv = {"OpFSub", " Cos ", "OpShiftLeftLogical"};
   test.forbidden_spirv = {"OpCapability Float16"};
   return test;
 }
@@ -26951,7 +27088,7 @@ TestCase VectorSinF16SdwaAndEdges() {
                           "v4.sdwa(sel=5,sext=0)",
                           1}};
   test.ir_counts = {{" = FPSin ", 9}};
-  test.required_spirv = {" Fract ", " Sin "};
+  test.required_spirv = {"OpFSub", " Sin ", "OpShiftLeftLogical"};
   test.forbidden_spirv = {"OpCapability Float16"};
   return test;
 }
@@ -28431,10 +28568,74 @@ TestCase VectorCompareExecWaveMasks(u32 wave_size) {
   test.opcodes.insert(test.opcodes.end(), {O::V_MOV_B32, O::S_MOV_B32, O::S_MOV_B64,
       O::V_LSHLREV_B32, O::V_ADD_NC_U32, O::BUFFER_LOAD_DWORD,
       O::BUFFER_STORE_DWORD, O::S_ENDPGM});
+  // EQ (0x32), LG (0x35) and NLG (0x3a) here take the integer raw-bit path, so
+  // they instead require OpIEqual / OpLogicalNot / OpLogicalAnd / OpLogicalOr.
   test.required_spirv = {"OpFOrdLessThanEqual", "OpFOrdGreaterThanEqual", "OpFOrdLessThan",
-                         "OpFOrdGreaterThan",   "OpFOrdEqual",           "OpFOrdNotEqual",
-                         "OpFUnordEqual",       "OpFUnordNotEqual",      "OpFUnordLessThan",
+                         "OpFOrdGreaterThan",   "OpIEqual",               "OpLogicalAnd",
+                         "OpLogicalOr",         "OpLogicalNot",
+                         "OpFUnordNotEqual",    "OpFUnordLessThan",
                          "OpFUnordGreaterThan", "OpFUnordLessThanEqual", "OpFUnordGreaterThanEqual"};
+  return test;
+}
+
+TestCase F64NaNOrderedProbe() {
+  using O = ShaderOpcode;
+  // Isolate each ordered F64 compare on NaN pairs to find which op the driver
+  // miscompiles; every row must read false for a NaN pair.
+  const std::array<std::array<uint64_t, 2>, 4> pairs{{
+      {0x7ff8000000000001ull, 0x7ff8000000000001ull},
+      {0x7ff0000000000001ull, 0x0000000000000000ull},
+      {0x0000000000000000ull, 0x7ff8000000000001ull},
+      {0x7ff0000000000000ull, 0x7ff0000000000000ull}}}; // +Inf,+Inf passes for sanity
+  constexpr std::array<u32, 4> ops{0x21, 0x22, 0x24, 0x25}; // LT, EQ, GT, LG
+  TestCase test;
+  test.name = "F64NaNOrderedProbe";
+  for (const auto& pair : pairs)
+    for (const auto bits : pair)
+      test.initial.insert(test.initial.end(), {u32(bits), u32(bits >> 32)});
+  test.expected = test.initial;
+  const auto store_mask = [&](u32 sgpr, bool value) {
+    AppendStoreSgprPair(&test.code, sgpr, static_cast<u32>(test.expected.size()));
+    test.expected.insert(test.expected.end(), {u32(value), 0});
+  };
+  for (u32 i = 0; i < pairs.size(); ++i) {
+    for (u32 word = 0; word < 4; ++word) {
+      AppendVMovU32(&test.code, 31, (i * 4 + word) * 4);
+      AppendBufferLoadDword(&test.code, 1 + word, 31);
+      // Fold-defeat: v_or_b32 v<word+1>, v<word+1>, v<word+1>. A read-write
+      // vector op makes the load non-constant-foldable; the recompiler kept
+      // folding value-preserving mov/shift and eased the load out entirely,
+      // which broke the +Inf,+Inf EQ row (hi==0x7ff00000 folded to zero).
+      test.code.push_back(EncodeVop2(0x1c, 1 + word, Vgpr(1 + word), Vgpr(1 + word)));
+    }
+    for (const auto op : ops) {
+      test.code.push_back(EncodeVopc(op, Vgpr(1), 3));
+      store_mask(106, false); // overwritten below with the faithful expectation
+    }
+    // Rewrite expectations: for NaN pairs every ordered op is false; +Inf,+Inf
+    // pair: LT=0 EQ=1 GT=0 LG=0.
+    const uint64_t a = pairs[i][0], b = pairs[i][1];
+    const double lhs = std::bit_cast<double>(a), rhs = std::bit_cast<double>(b);
+    const bool is_nan_pair =
+        ((a & 0x7ff0000000000000ull) == 0x7ff0000000000000ull &&
+         (a & 0x000fffffffffffffull) != 0) ||
+        ((b & 0x7ff0000000000000ull) == 0x7ff0000000000000ull &&
+         (b & 0x000fffffffffffffull) != 0);
+    // Faithful IEEE expectations per row: LT, EQ, GT, LG (unordered false).
+    const std::array<bool, 4> want{
+        !is_nan_pair && lhs < rhs, !is_nan_pair && lhs == rhs,
+        !is_nan_pair && lhs > rhs, !is_nan_pair && (lhs < rhs || lhs > rhs)};
+    // Fix the just-pushed slots directly.
+    const auto total = test.expected.size();
+    for (u32 k = 0; k < ops.size(); ++k)
+      test.expected[total - (ops.size() - k) * 2] = u32(want[k]);
+  }
+  AppendEnd(&test.code);
+  test.initial.resize(test.expected.size());
+  test.opcodes = {O::V_MOV_B32, O::BUFFER_LOAD_DWORD, O::V_CMP_LT_F64,
+                  O::V_CMP_EQ_F64, O::V_CMP_GT_F64, O::V_CMP_LG_F64,
+                  O::BUFFER_STORE_DWORD, O::S_ENDPGM};
+  test.required_spirv = {"OpFOrdLessThan", "OpFOrdGreaterThan", "OpIEqual", "OpBitwiseAnd"};
   return test;
 }
 
@@ -28465,6 +28666,10 @@ TestCase VectorCompareF64Edges() {
     for (u32 word = 0; word < 4; ++word) {
       AppendVMovU32(&test.code, 31, (i * 4 + word) * 4);
       AppendBufferLoadDword(&test.code, 1 + word, 31);
+      // Fold-defeat: route the staged dword through a v_lshlrev_b32 into a
+      // scratch VGPR so the driver cannot constant-fold the load (it previously
+      // folded hi==0x7ff00000 to zero, breaking the +Inf,+Inf EQ row only).
+      test.code.push_back(EncodeVop2(0x1a, 200 + word, InlineU32(1), 1 + word));
     }
     const auto lhs = std::bit_cast<double>(pairs[i][0]);
     const auto rhs = std::bit_cast<double>(pairs[i][1]);
@@ -28507,10 +28712,11 @@ TestCase VectorCompareF64Edges() {
                   O::V_CMP_NLE_F64, O::V_CMP_NEQ_F64, O::V_CMP_NLT_F64, O::V_CMP_TRU_F64,
                   O::BUFFER_STORE_DWORD, O::S_ENDPGM};
   test.required_spirv = {"OpCapability Float64", "OpTypeFloat 64", "OpIsNan",
-                         "OpFOrdEqual", "OpFOrdNotEqual", "OpFOrdLessThan",
+                         "OpFOrdLessThan",
                          "OpFOrdLessThanEqual", "OpFOrdGreaterThan", "OpFOrdGreaterThanEqual",
-                         "OpFUnordEqual", "OpFUnordNotEqual", "OpFUnordLessThan",
-                         "OpFUnordLessThanEqual", "OpFUnordGreaterThan", "OpFUnordGreaterThanEqual"};
+                         "OpFUnordNotEqual", "OpFUnordLessThan",
+                         "OpFUnordLessThanEqual", "OpFUnordGreaterThan", "OpFUnordGreaterThanEqual",
+                         "OpLogicalNot", "OpLogicalAnd", "OpLogicalOr", "OpIEqual"};
   return test;
 }
 
@@ -28578,7 +28784,8 @@ TestCase VectorCompare64WaveMasks(u32 wave_size, bool integer_ne = false) {
                   O::V_ADD_NC_U32, O::BUFFER_LOAD_DWORD,
                   integer_ne ? O::V_CMP_NE_I64 : O::V_CMP_EQ_F64,
                   O::BUFFER_STORE_DWORD, O::S_ENDPGM};
-  test.required_spirv = {integer_ne ? "OpINotEqual" : "OpFOrdEqual"};
+  // EQ takes the integer raw-bit path (OpFOrdEqual miscompiles on some GPUs).
+  test.required_spirv = {integer_ne ? "OpINotEqual" : "OpIEqual"};
   return test;
 }
 
@@ -28703,7 +28910,10 @@ TestCase VectorFractF64CapturedAndEdges() {
   test.opcodes = {O::V_MOV_B32, O::BUFFER_LOAD_DWORD, O::V_FRACT_F64,
                   O::V_AND_B32, O::S_MOV_B64, O::BUFFER_STORE_DWORD, O::S_ENDPGM};
   test.decoded_counts = {{"V_FRACT_F64 v4, v4", cases.size() + 1}};
-  test.required_spirv = {"OpCapability Float64", "OpTypeFloat 64", "Fract"};
+  // Fract lowers as x - floor(x), GCN's V_FRACT semantics; GLSLstd450Fract is
+  // out of the path (it miscompiles on some GPUs for F64).
+  test.required_spirv = {"OpCapability Float64", "OpTypeFloat 64", "Floor",
+                         "OpFSub"};
   return test;
 }
 
@@ -28903,7 +29113,8 @@ TestCase VectorFractF64CapturedChainRuntimeExec() {
   test.compute_info.threads_num[1] = test.compute_info.threads_num[2] = 1;
   test.compute_info.thread_ids_num = 1;
   test.has_compute_info = true;
-  test.required_spirv = {"OpCapability Float64", "OpFDiv", "Fma", "Fract"};
+  // FPFract64 lowers as x - floor(x) (GLSLstd450Fract miscompiles on some GPUs).
+  test.required_spirv = {"OpCapability Float64", "OpFDiv", "Fma", "Floor", "OpFSub"};
   test.forbidden_spirv = {"RoundingModeRTE"};
   test.ir_counts = {{"FPRecip32", 1}, {"ConvertF64S32", 1}, {"ConvertF64F32", 3},
                     {"FPFma64", 3}, {"FPFract64", 3}, {"ConvertF32F64", 3}};
@@ -46375,6 +46586,10 @@ void CheckResourcePlanHandoff() {
             MaterializeResources(plan, runtime, snapshot, specialization) &&
                 snapshot.buffers.size() == 1 && snapshot.buffers[0].dwords[0] == 0x1000u,
             "SRT buffer descriptor was not materialized");
+    using Ranges = std::vector<std::pair<uint64_t, uint64_t>>;
+    Require(name, "native scalar payload address",
+            snapshot.gpu_scalar_reads == (numeric_read ? Ranges{{16u, 4u}} : Ranges{}),
+            "the GPU-side scalar load address was not reported for residency");
     auto compiled = ShaderRecompiler::CompileProgram(std::move(translated), options,
                                                      specialization);
     ValidateSpirv(name, compiled.spirv);
@@ -49307,8 +49522,43 @@ int main(int argc, char **argv) {
     RunCase(&vulkan, VectorMinMaxF16Ops());
     return 0;
   }
+  if (argc == 3 && std::strcmp(argv[1], "--spv-dump") == 0 && !std::strcmp(argv[2], "nanprobe")) {
+    VulkanHarness vulkan;
+    (void)vulkan;
+    const auto c = F64NaNOrderedProbe();
+    const auto compiled = CompileCase(c);
+    spvtools::SpirvTools tools(SPV_ENV_VULKAN_1_2);
+    std::string text;
+    tools.Disassemble(compiled.spirv, &text);
+    std::fwrite(text.data(), 1, text.size(), stdout);
+    std::fputc('\n', stdout);
+    return 0;
+  }
+  if (argc == 3 && std::strcmp(argv[1], "--spv-dump") == 0 && !std::strcmp(argv[2], "f64edges")) {
+    VulkanHarness vulkan;
+    (void)vulkan;
+    const auto c = VectorCompareF64Edges();
+    const auto compiled = CompileCase(c);
+    spvtools::SpirvTools tools(SPV_ENV_VULKAN_1_2);
+    std::string text;
+    tools.Disassemble(compiled.spirv, &text);
+    std::fwrite(text.data(), 1, text.size(), stdout);
+    std::fputc('\n', stdout);
+    return 0;
+  }
+  if (argc == 2 && std::strcmp(argv[1], "--fract-f64-edge-only") == 0) {
+    VulkanHarness vulkan;
+    RunCase(&vulkan, VectorFractF64CapturedAndEdges());
+    return 0;
+  }
+  if (argc == 2 && std::strcmp(argv[1], "--nanprobe-only") == 0) {
+    VulkanHarness vulkan;
+    RunCase(&vulkan, F64NaNOrderedProbe());
+    return 0;
+  }
   if (argc == 2 && std::strcmp(argv[1], "--cmp-eq-f64-only") == 0) {
     VulkanHarness vulkan;
+    RunCase(&vulkan, F64NaNOrderedProbe());
     RunCase(&vulkan, VectorCompareF64Edges());
     RunCase(&vulkan, VectorCompare64WaveMasks(32));
     RunCase(&vulkan, VectorCompare64WaveMasks(64));
@@ -49991,6 +50241,12 @@ int main(int argc, char **argv) {
     CheckDepthTargetFootprints();
     return 0;
   }
+  if (argc == 2 && std::strcmp(argv[1], "--scalar-load-residency-only") == 0) {
+    VulkanHarness vulkan;
+    vulkan.CheckBdaReadBuffers();
+    vulkan.CheckScalarLoadResidency();
+    return 0;
+  }
   if (argc == 2 && std::strcmp(argv[1], "--bda-page-table-only") == 0) {
     VulkanHarness vulkan;
     vulkan.CheckBdaPageTableUploads();
@@ -50227,6 +50483,8 @@ int main(int argc, char **argv) {
   vulkan.CheckZeroStrideBufferBinding();
   vulkan.CheckNullTextureDescriptors();
   vulkan.CheckBdaPageTableUploads();
+  vulkan.CheckBdaReadBuffers();
+  vulkan.CheckScalarLoadResidency();
   vulkan.CheckBdaSyncUploads();
   vulkan.CheckLargeSparseImageUpload();
   vulkan.CheckUnifiedTextureCacheFlow();

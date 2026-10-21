@@ -16,6 +16,7 @@
 
 #include <algorithm>
 #include <cinttypes>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <utility>
@@ -27,6 +28,32 @@ namespace {
 
 constexpr uint64_t MiB           = 1024 * 1024;
 constexpr uint64_t GdsBufferSize = 64 * 1024;
+
+// printf-style tracing of the buffer fill / write-claim paths (issue #1072):
+// distinguishes "the -1 reset fill landed in guest memory", "the -1 reset fill
+// landed in a host buffer that a dispatch owns via m_gpu_modified_ranges", and
+// which buffer a written ObtainBuffer claim attached to. Opt in with the
+// KYTY_TRACE_BUFFILL environment variable; output goes to the normal log.
+bool TraceBufferFillEnabled() {
+	static const bool enabled = std::getenv("KYTY_TRACE_BUFFILL") != nullptr;
+	return enabled;
+}
+
+void TraceBufferFill(const char* branch, uint64_t vaddr, uint64_t size, uint32_t value) {
+	if (TraceBufferFillEnabled()) {
+		LOGF("BufferCache: fill branch=%s vaddr=0x%016" PRIx64 " size=0x%" PRIx64
+		     " value=0x%08x\n",
+		     branch, vaddr, size, value);
+	}
+}
+
+void TraceBufferWriteClaim(const char* kind, BufferId id, uint64_t vaddr, uint64_t size) {
+	if (TraceBufferFillEnabled()) {
+		LOGF("BufferCache: write-claim kind=%s id=%" PRIu32 " vaddr=0x%016" PRIx64
+		     " size=0x%" PRIx64 "\n",
+		     kind, id.index, vaddr, size);
+	}
+}
 
 std::pair<Buffer*, uint64_t> UploadMemory(GraphicContext& graphics, CommandScheduler& scheduler,
                                         StreamBuffer& staging, uint64_t size, uint64_t alignment,
@@ -514,6 +541,7 @@ std::pair<Buffer*, uint64_t> BufferCache::ObtainBuffer(uint64_t vaddr, uint64_t 
 	TouchBuffer(buffer);
 	(void)SynchronizeBuffer(buffer, vaddr, size, is_written, is_texel_buffer);
 	if (is_written) {
+		TraceBufferWriteClaim("dirty", id, vaddr, size);
 		m_gpu_modified_ranges.Add(vaddr, size);
 	}
 	return {&buffer, buffer.Offset(vaddr)};
@@ -562,11 +590,13 @@ void BufferCache::FillBuffer(uint64_t vaddr, uint64_t size, uint32_t value, bool
 	(void)m_texture_cache.ClearMeta(vaddr);
 	if (!IsRegionGpuModified(vaddr, size)) {
 		// Access the guest mapping so write faults invalidate cached buffers and images.
+		TraceBufferFill("guest", vaddr, size, value);
 		auto* destination = reinterpret_cast<uint32_t*>(vaddr);
 		std::fill(destination, destination + size / sizeof(uint32_t), value);
 		return;
 	}
 
+	TraceBufferFill("host-owning-buffer", vaddr, size, value);
 	m_texture_cache.InvalidateMemoryFromGPU(vaddr, size);
 	auto [dst, dst_offset] = ObtainBuffer(vaddr, size, true, true);
 	dst->Fill(dst_offset, size, value);

@@ -1375,7 +1375,82 @@ struct SystemOverlay::Impl {
 		ImGui::End();
 	}
 
+	// Simulated browser panel: a real page cannot be fetched, so the dialog shows an
+	// editable address bar plus a closed-page notice; closing it resumes the game.
+	void DrawBrowserDialog(const SystemDialog::HostSnapshot& snapshot, vk::Extent2D extent) {
+		const ImVec2 display(static_cast<float>(extent.width), static_cast<float>(extent.height));
+		const float  scale = std::max(std::min(display.x / 1280.0f, display.y / 720.0f), 0.5f);
+
+		// The address text the user edits lives outside the per-frame snapshot so the
+		// field keeps what was typed across frames and sessions; re-seeded when the game
+		// opens the dialog again (new generation).
+		static char                         url_buf[SystemDialog::kBrowserUrlSize] {};
+		static uint64_t                     url_generation = 0;
+		if (url_generation != snapshot.generation) {
+			std::memcpy(url_buf, snapshot.url, sizeof(url_buf));
+			url_generation = snapshot.generation;
+		}
+
+		ImGui::GetBackgroundDrawList()->AddRectFilled({0.0f, 0.0f}, display,
+		                                              IM_COL32(0, 0, 0, 160));
+		const float width  = std::min(display.x * 0.88f, 1100.0f * scale);
+		const float height = std::min(display.y * 0.86f, 700.0f * scale);
+		ImGui::SetNextWindowPos({display.x * 0.5f, display.y * 0.5f}, ImGuiCond_Always, {0.5f, 0.5f});
+		ImGui::SetNextWindowSize({width, height}, ImGuiCond_Always);
+		if (focus_pending) {
+			ImGui::SetNextWindowFocus();
+		}
+		ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {16.0f * scale, 12.0f * scale});
+		ImGui::PushFont(nullptr, 18.0f * scale);
+		constexpr ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
+		                                   ImGuiWindowFlags_NoSavedSettings |
+		                                   ImGuiWindowFlags_NoCollapse |
+		                                   ImGuiWindowFlags_NoBringToFrontOnFocus;
+		ImGui::Begin("##BrowserDialog", nullptr, flags);
+
+		// Address bar row.
+		ImGui::SetNextItemWidth(std::max(width - 170.0f * scale, 120.0f));
+		ImGui::InputTextWithHint("##browser_url", "https://www.playstation.com/", url_buf,
+		                         sizeof(url_buf));
+		ImGui::SameLine();
+		ImGui::BeginDisabled(true);
+		ImGui::Button("Reload", {70.0f * scale, 0.0f});
+		ImGui::SetItemTooltip("Navigation is not performed in this simulated browser");
+		ImGui::EndDisabled();
+
+		ImGui::Separator();
+
+		ImGui::BeginChild("##browser_page", ImGui::GetContentRegionAvail(),
+		                  ImGuiChildFlags_None);
+		ImGui::TextDisabled("The web browser dialog is simulated. No page is fetched.");
+		ImGui::TextWrapped("%s", "The game sees the dialog as open until you close it; closing "
+		                        "resumes the game and delivers a system service event.");
+		ImGui::EndChild();
+
+		ImGui::Separator();
+		const float close_width = std::min(140.0f * scale, ImGui::GetContentRegionAvail().x);
+		ImGui::SetCursorPosX(ImGui::GetWindowSize().x - close_width -
+		                     ImGui::GetStyle().WindowPadding.x);
+		const bool closed = ImGui::Button("Close", {close_width, 40.0f * scale}) ||
+		                    ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) ||
+		                    ImGui::IsKeyPressed(ImGuiKey_Escape, false);
+		if (focus_pending) {
+			ImGui::SetItemDefaultFocus();
+			focus_pending = false;
+		}
+		ImGui::End();
+		ImGui::PopFont();
+		ImGui::PopStyleVar();
+		if (closed) {
+			SystemDialog::HostClose(snapshot.generation);
+		}
+	}
+
 	void DrawDialog(const SystemDialog::HostSnapshot& snapshot, vk::Extent2D extent) {
+		if (snapshot.kind == SystemDialog::Kind::Browser) {
+			DrawBrowserDialog(snapshot, extent);
+			return;
+		}
 		const ImVec2 display(static_cast<float>(extent.width), static_cast<float>(extent.height));
 		const float  scale = std::max(std::min(display.x / 1280.0f, display.y / 720.0f), 0.5f);
 		ImGui::GetBackgroundDrawList()->AddRectFilled({0.0f, 0.0f}, display,

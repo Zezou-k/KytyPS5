@@ -41,7 +41,9 @@ uint32_t              EmitCompositeExtractU64(EmitterState& state, uint32_t arg0
 uint32_t              EmitCompositeExtractU32x2(EmitterState& state, uint32_t arg0, IR::Value arg1);
 inline constexpr auto EmitCompositeExtractU32x3 = EmitCompositeExtractU32x2;
 inline constexpr auto EmitCompositeExtractU32x4 = EmitCompositeExtractU32x2;
-inline constexpr auto EmitPackHalf2x16 = EmitGlsl<GLSLstd450PackHalf2x16, IR::Type::U32, uint32_t>;
+// GLSLstd450PackHalf2x16 truncates instead of RNE on some GPUs; route to the
+// bitwise RNE conversion (see EmitF32ToF16RneBits).
+uint32_t              EmitPackHalf2x16(EmitterState& state, uint32_t pair);
 inline constexpr auto EmitPackSnorm2x16 =
     EmitGlsl<GLSLstd450PackSnorm2x16, IR::Type::U32, uint32_t>;
 inline constexpr auto EmitPackUnorm2x16 =
@@ -203,8 +205,8 @@ inline constexpr auto EmitFPTrunc32     = EmitGlsl<GLSLstd450Trunc, IR::Type::F3
 inline constexpr auto EmitFPFloor64     = EmitGlsl<GLSLstd450Floor, IR::Type::F64, uint32_t>;
 inline constexpr auto EmitFPCeil64      = EmitGlsl<GLSLstd450Ceil, IR::Type::F64, uint32_t>;
 inline constexpr auto EmitFPTrunc64     = EmitGlsl<GLSLstd450Trunc, IR::Type::F64, uint32_t>;
-inline constexpr auto EmitFPFract32     = EmitGlsl<GLSLstd450Fract, IR::Type::F32, uint32_t>;
-inline constexpr auto EmitFPFract64     = EmitGlsl<GLSLstd450Fract, IR::Type::F64, uint32_t>;
+uint32_t              EmitFPFract32(EmitterState& state, uint32_t arg0);
+uint32_t              EmitFPFract64(EmitterState& state, uint32_t arg0);
 uint32_t              EmitFPSin(EmitterState& state, uint32_t arg0);
 uint32_t              EmitFPCos(EmitterState& state, uint32_t arg0);
 #undef EMIT_NATIVE

@@ -179,6 +179,30 @@ bool DecodeBufferDescriptor(const DescriptorValue& descriptor, ShaderBufferResou
 	return true;
 }
 
+struct ReadCapture {
+	SrtRuntime                                  source;
+	std::vector<std::pair<uint64_t, uint64_t>>& ranges;
+};
+
+bool CaptureStrictRead(void* userdata, uint64_t address, std::span<uint32_t> values) {
+	auto& capture = *static_cast<ReadCapture*>(userdata);
+	if (!capture.source.read_specialization_memory(capture.source.userdata, address, values)) {
+		return false;
+	}
+	capture.ranges.emplace_back(address, values.size_bytes());
+	return true;
+}
+
+bool CaptureOrdinaryRead(void* userdata, uint64_t address, std::span<uint32_t> values) {
+	auto& capture = *static_cast<ReadCapture*>(userdata);
+	// Never dereference a guest address directly: a table the guest never set must fail the read.
+	const auto reader = capture.source.read_memory != nullptr ? capture.source.read_memory
+	                                                          : capture.source.read_specialization_memory;
+	if (reader == nullptr || !reader(capture.source.userdata, address, values)) return false;
+	capture.ranges.emplace_back(address, values.size_bytes());
+	return true;
+}
+
 const DescriptorSource* Source(const ResourcePlan& program, uint32_t source) {
 	if (source >= program.descriptor_sources.size()) {
 		return nullptr;
@@ -214,6 +238,64 @@ void MarkCleanReads(const std::unordered_set<const Inst*>& planned_reads,
 		}
 	}
 }
+
+// The host plan reads user data and planned SRT reads. Other memory is read by the shader
+// itself, so a value that depends on it is only known on the GPU.
+bool DependsOnShaderMemory(Value value) {
+	std::vector<Value>              pending {value};
+	std::unordered_set<const Inst*> visited;
+	while (!pending.empty()) {
+		const auto* inst = pending.back().Resolve().TryInstruction();
+		pending.pop_back();
+		if (inst == nullptr || inst->GetOpcode() == ValueOpcode::ReadConst ||
+		    !visited.insert(inst).second) {
+			continue;
+		}
+		const auto op = inst->GetOpcode();
+		if (BufferAccessOf(op) != BufferAccess::None ||
+		    AddressOpcodeInfoOf(op).access != AddressAccess::None ||
+		    ImageOpcodeInfoOf(op).access != ImageAccess::None ||
+		    SharedAccessOf(op) != SharedAccess::None) {
+			return true;
+		}
+		for (size_t arg = 0; arg < inst->NumArgs(); arg++) {
+			pending.push_back(inst->Arg(arg));
+		}
+	}
+	return false;
+}
+
+// Runs after RefreshFlatBuffer, which skipped the blocks these values cannot reach and read the
+// SRT reads that dominate the visited ones. The addresses therefore read nothing new.
+void RefreshGpuScalarReads(const ResourcePlan& program, SrtWalker& walker,
+                           std::vector<std::pair<uint64_t, uint64_t>>& ranges) {
+	ranges.clear();
+	for (const auto& read: program.gpu_scalar_reads) {
+		if (!program.control_flow.empty() && program.visited_blocks.at(read.block) == 0u) {
+			continue;
+		}
+		std::array<uint32_t, 3> terms {};
+		bool                    known = true;
+		for (uint32_t term = 0; term < terms.size() && known; term++) {
+			known = walker.Evaluate(read.address[term], terms[term]);
+		}
+		// An address the host cannot evaluate stays with the fault path, like GPU-only addresses.
+		if (!known) {
+			continue;
+		}
+		// The shader's GuestAddress aligns each term to a DWORD before adding them.
+		const auto immediate = static_cast<int32_t>(read.offset & ~3u);
+		const auto address = ((uint64_t {terms[1]} << 32u) | (terms[0] & ~3u)) + (terms[2] & ~3u) +
+		                     static_cast<uint64_t>(int64_t {immediate});
+		if (!ranges.empty() && address - ranges.back().first <= ranges.back().second) {
+			auto& [first, size] = ranges.back();
+			size                = std::max<uint64_t>(size, address - first + sizeof(uint32_t));
+		} else {
+			ranges.emplace_back(address, sizeof(uint32_t));
+		}
+	}
+}
+
 
 bool ReadTable(uint64_t base, uint64_t size, uint64_t offset,
                const SrtRuntime& runtime, std::span<uint32_t> words) {
@@ -821,7 +903,7 @@ bool MaterializeIndirectDescriptor(const ResourcePlan&                         p
 	} else {
 		auto& root                      = specializations[resource_index];
 		root.indirect_root              = resource_index;
-		root.indirect_mapping_offset = static_cast<uint32_t>(mapping_offset);
+		root.indirect_mapping_offset    = static_cast<uint32_t>(mapping_offset);
 		root.indirect_search_iterations = std::bit_width(key_count);
 	}
 	return true;
@@ -1170,7 +1252,31 @@ static std::vector<ResourceBlock> ResourceControlFlow(const Program& program, co
 		block.sources.erase(std::unique(block.sources.begin(), block.sources.end()),
 		                    block.sources.end());
 	}
-	for (auto& block: blocks) block.condition = predicate(block.condition);
+	// Only branches that can change future resource access belong in the host plan.
+	std::vector<uint8_t> resource_reachable(blocks.size());
+	std::vector<uint32_t> pending;
+	for (uint32_t i = 0; i < blocks.size(); ++i) {
+		if (!blocks[i].sources.empty() || !blocks[i].srt_reads.empty()) {
+			resource_reachable[i] = 1;
+			pending.push_back(i);
+		}
+	}
+	while (!pending.empty()) {
+		const auto index = pending.back();
+		pending.pop_back();
+		for (const auto* predecessor: program.blocks[index]->ImmPredecessors()) {
+			const auto found = indices.find(predecessor);
+			if (found == indices.end()) return {};
+			if (resource_reachable[found->second]) continue;
+			resource_reachable[found->second] = 1;
+			pending.push_back(found->second);
+		}
+	}
+	for (auto& block: blocks) {
+		block.condition = std::ranges::any_of(block.successors, [&](uint32_t successor) {
+			return resource_reachable[successor] != 0;
+		}) ? predicate(block.condition) : Value {};
+	}
 	if (std::ranges::none_of(
 	        blocks, [](const ResourceBlock& block) { return !block.condition.IsEmpty(); })) {
 		return {};
@@ -1410,6 +1516,34 @@ ResourcePlan ExtractResourcePlan(const Program& program) {
 	for (const auto& read: program.srt_reads) {
 		plan.srt_reads.push_back({Clone(read.value), read.flat_offset});
 	}
+	// GPU-side scalar loads read through BDA. A page without a buffer reads zero and the fault
+	// buffer only adds it after the dispatch, so keep the addresses the host can evaluate.
+	for (uint32_t block = 0; block < program.blocks.size(); block++) {
+		for (const auto& inst: *program.blocks[block]) {
+			if (inst.GetOpcode() != ValueOpcode::LoadAddressU32) continue;
+			const auto& memory = program.memory_info.at(inst.Flags<MemoryFlags>().index);
+			const auto* handle = inst.Arg(0).ResolveInstruction();
+			if (memory.kind != ResourceKind::ScalarAddress || memory.planning_only ||
+			    handle == nullptr || handle->GetOpcode() != ValueOpcode::GetAddressResource ||
+			    handle->NumArgs() != 2u) {
+				continue;
+			}
+			const std::array address {handle->Arg(0), handle->Arg(1), inst.Arg(1)};
+			if (std::ranges::any_of(address, [&](Value value) {
+				    return !ValidateRuntimeValue(program, value, RuntimeValueType::Integer) ||
+				           DependsOnShaderMemory(value);
+			    })) {
+				continue;
+			}
+			plan.gpu_scalar_reads.push_back(
+			    {.address = {Clone(address[0]), Clone(address[1]), Clone(address[2])},
+			     .offset  = memory.offset,
+			     .block   = block});
+		}
+	}
+	// A proven uniform factor can decide a branch even when its other lanes are unknown.
+	// Keep only that Boolean structure, never the varying shader dependency graph.
+	Value unknown;
 	// Retain integer control expressions with opaque varying leaves. Their identities
 	// matter when an EXEC factor also guards a selected value; never clone float work.
 	bool capture_control_reads = false;
@@ -1559,6 +1693,7 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 		return SpecializationFail(fmt::format("SRT refresh complete={} reads={} user_data={}",
 		    program.srt_plan_complete, program.srt_reads.size(), runtime.user_data.size()));
 	}
+	RefreshGpuScalarReads(program, walker, snapshot.gpu_scalar_reads);
 	const auto active = std::span<const uint8_t>(program.active_sources);
 	std::array<uint32_t, 3> workgroup_counts {};
 	if (runtime.indirect_args_address != 0u) {
