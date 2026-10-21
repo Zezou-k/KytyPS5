@@ -2184,6 +2184,60 @@ public:
     std::printf("[host]    %-32s ok\n", "DescriptorHeapLargeSet");
   }
 
+  /// Exercises the scalar-read guard through the renderer's descriptor commit.
+  /// Disjoint reads must succeed for fixed and indexed writes; overlaps must terminate.
+  void CheckScalarBufferWriteBindings(bool overlapping, bool fixed = false) {
+    const char *name = fixed ? "FixedBufferWriteBindings" : "ScalarBufferWriteBindings";
+    constexpr uint64_t guest_base = 0x1000;
+    constexpr uint64_t bytes = 0x840;
+    EnsureRuntimeContext();
+    RenderContext context(m_runtime_context);
+    auto &scheduler = context.GetCommandScheduler();
+    HW::Context registers{};
+    HW::UserConfig user_config{};
+    HW::Shader shaders{};
+    scheduler.Begin(registers, user_config, shaders);
+
+    ShaderRecompiler::IR::CompiledShaderInfo program{};
+    program.stage = ShaderType::Compute;
+    ShaderRecompiler::IR::BufferResource resource{};
+    resource.read = true;
+    resource.written = true;
+    resource.atomic = true;
+    resource.descriptor_index = 0;
+    resource.packed_stride = 64;
+    // A fixed atomic subtraction is unsupported by the indexed proof, so its
+    // disjoint read must be accepted by upstream's write_extent check alone.
+    resource.write_extent = fixed ? 4u : UINT32_MAX;
+    resource.unknown_write_pattern = fixed;
+    if (!fixed) resource.indexed_write_patterns.emplace_back(24, 4);
+    program.info.buffers.push_back(resource);
+    program.bindings.descriptor_counts[0] = 1;
+    program.bindings.descriptor_mask = 1;
+    ShaderRecompiler::IR::ResourceSnapshot snapshot;
+    snapshot.specialization_reads.emplace_back(
+        guest_base + (fixed ? (overlapping ? 0 : 64) : (overlapping ? 24 : 0)),
+        sizeof(uint32_t));
+    ShaderStageRuntime runtime{&program, &snapshot};
+    auto host = CreateHostBuffer(name, bytes,
+                                vk::BufferUsageFlagBits::eStorageBuffer, {});
+    PreparedBindings bindings;
+    bindings.runtime = &runtime;
+    bindings.buffer_sources.push_back({guest_base, bytes, {}});
+    bindings.buffers.emplace_back(host.buffer, 0, bytes);
+    bindings.shader_data.resize(program.bindings.ShaderDataDwords());
+
+    const auto pipeline = RenderExecutorTestAccess::CommitBindings(
+        context.GetRenderExecutor(), scheduler.Current(), bindings);
+    scheduler.Finish();
+    RenderExecutorTestAccess::DestroyDescriptorPipelines(
+        context.GetRenderExecutor(), std::span{&pipeline, 1u});
+    DestroyBuffer(&host);
+    Require(name, "overlapping field", !overlapping,
+            "CommitBindings accepted a scalar read of the atomic write field");
+    std::printf("[host]    %-32s ok\n", name);
+  }
+
   void CheckGraphicsPushConstantBank() {
     constexpr const char *name = "GraphicsPushConstantStages";
     EnsureRuntimeContext();
@@ -27914,8 +27968,8 @@ TestCase VectorMed3F32NanUsesMin3Path(u32 wave) {
   test.opcodes = {O::V_MOV_B32, O::BUFFER_LOAD_DWORD, O::V_MED3_F32,
                   O::BUFFER_STORE_DWORD, O::S_ENDPGM};
   test.ir_counts = {{"FPMedTri32", std::size(cases)}};
-  // Measured 17,593/36,607 words; keep classification growth below a single MED3.
-  test.max_spirv_words = wave == 32u ? 17600u : 36620u;
+  // Measured 16,140/33,705 words; keep min/max expansion growth below a single MED3.
+  test.max_spirv_words = wave == 32u ? 16150u : 33720u;
   return test;
 }
 
@@ -43885,7 +43939,8 @@ void CheckTessellationProgram(const char *name, u32 ls_stride, u32 hs_stride) {
 
 // PPSA25468: CP0 writes patch constants below the 32 KiB offchip ring end
 // through mul24 addresses that reuse data VGPRs under nested EXEC masks, and
-// the TES reads them back.
+// the TES reads them back. As in God of War Ragnarok, the HS reads its next LS
+// record, loops on a v_cmpx header and CP0 reads back another CP's outputs.
 void CheckTessellationPatchConstants() {
   using namespace ShaderRecompiler;
   using Attribute = IR::TessellationAttribute;
@@ -43899,7 +43954,7 @@ void CheckTessellationPatchConstants() {
   local.push_back(EncodeDs1(0, 2, 20));
   local.push_back(EncodeSop1(0x20, 0, 6));
 
-  const auto make_control = [&](bool divergent) {
+  const auto make_control = [&](bool divergent, bool carried) {
     std::vector<u32> control;
     AppendVop3(&control, 0x365, 0, 193u, InlineU32(0));
     AppendVop3(&control, 0x366, 0, 193u, Vgpr(0));
@@ -43912,7 +43967,10 @@ void CheckTessellationPatchConstants() {
     control.push_back(0xffu);
     control.push_back(EncodeVop2(0x0b, 0, 255u, 16)); // v_mul_u32_u24 v0, hs_stride, v16
     control.push_back(hs_stride);
-    AppendVop3(&control, 0x169, 1, Vgpr(16), 255u); // v_mul_lo_u32 v1, v16, ls_stride
+    control.push_back(EncodeVopc(0xc4, InlineU32(2), 16));    // v_cmp_gt_u32 vcc, 2, v16
+    control.push_back(EncodeVop2(0x25, 1, InlineU32(1), 16)); // v_add_nc_u32 v1, 1, v16
+    control.push_back(EncodeVop2(0x01, 1, InlineU32(0), 1));  // v_cndmask_b32 v1, 0, v1, vcc
+    AppendVop3(&control, 0x169, 1, Vgpr(1), 255u); // v_mul_lo_u32 v1, v1, ls_stride
     control.push_back(ls_stride);
     AppendVop3(&control, 0x143, 17, 255u, Vgpr(50), Vgpr(0));
     control.push_back(3 * hs_stride);
@@ -43932,12 +43990,33 @@ void CheckTessellationPatchConstants() {
       control.push_back(EncodeVop2(0x25, 17, InlineU32(4), 17)); // v_add_nc_u32 v17, 4, v17
     }
     control[skip_scale] = EncodeSopp(0x06, control.size() - skip_scale - 1u);
+    control.push_back(EncodeSop1(0x04, 6, 126));       // s_mov_b64 s[6:7], exec
+    control.push_back(EncodeSMovB32(5, InlineU32(0))); // s_mov_b32 s5, 0
+    const auto loop = control.size();
+    control.push_back(EncodeVopc(0xd1, 5, 16)); // v_cmpx_lt_u32 s5, v16
+    const auto exit_loop = control.size();
+    control.push_back(0u); // s_cbranch_execz
     control.push_back(EncodeMubuf0(0x1c, 24));
     control.push_back(EncodeMubuf1(12, 2, 17, 2));
+    // Only the back edge shows a loop-carried v17 at the store above.
+    if (carried) {
+      control.push_back(EncodeVop2(0x25, 17, InlineU32(4), 17)); // v_add_nc_u32 v17, 4, v17
+    }
+    control.push_back(EncodeVop2(0x25, 13, InlineU32(1), 13)); // v_add_nc_u32 v13, 1, v13
+    control.push_back(EncodeSop2(0x00, 5, 5, InlineU32(1)));   // s_add_u32 s5, s5, 1
+    control.push_back(EncodeSopp(0x02, loop - control.size() - 1u)); // s_branch
+    control[exit_loop] = EncodeSopp(0x08, control.size() - exit_loop - 1u);
+    control.push_back(EncodeSop1(0x04, 126, 6)); // s_mov_b64 exec, s[6:7]
+    control.push_back(EncodeSopp(0x0a));         // s_barrier
     // CP0 reuses data VGPR v10 for the ring address 0x8000 - (patch + 1) * 0xf0.
     control.push_back(EncodeVopc(0xd4, InlineU32(1), 16)); // v_cmpx_gt_u32 1, v16
     const auto skip_patch = control.size();
     control.push_back(0u); // s_cbranch_execz
+    control.push_back(EncodeVop2(0x0b, 11, 255u, 50)); // v_mul_u32_u24 v11, 3 * hs_stride, v50
+    control.push_back(3 * hs_stride);
+    // buffer_load_dwordx2 v[11:12], v11, s[8:11], s2 offen offset:hs_stride + 16 (CP1)
+    control.push_back(EncodeMubuf0(0x0d, hs_stride + 16));
+    control.push_back(EncodeMubuf1(11, 2, 11, 2));
     control.push_back(EncodeVop2(0x25, 10, InlineU32(1), 50)); // v_add_nc_u32 v10, 1, v50
     control.push_back(EncodeVop2(0x0b, 10, 255u, 10));         // v_mul_u32_u24 v10, 0xf0, v10
     control.push_back(patch_stride);
@@ -43959,7 +44038,7 @@ void CheckTessellationPatchConstants() {
     AppendEnd(&control);
     return control;
   };
-  const auto control = make_control(false);
+  const auto control = make_control(false, false);
 
   std::vector<u32> evaluation;
   AppendVop3(&evaluation, 0x169, 24, 255u, Vgpr(7));
@@ -43982,13 +44061,14 @@ void CheckTessellationPatchConstants() {
   ShaderTessellationInputInfo tess{.input_control_points = 3,
                                   .output_control_points = 3,
                                   .domain = 1,
-                                  .partitioning = 2,
+                                  .partitioning = 0,
                                   .output_topology = 2};
   AnalyzeTessellationPrograms(local, control, tess);
   Require(name, "reflected interface",
           tess.ls_stride == ls_stride && tess.hs_stride == hs_stride &&
               tess.patch_base == 0x7f10u && tess.patch_size == 28u,
-          "b128 LS records, joined HS paths and CP0 patch stores must reflect the layout");
+          "b128 LS records, selected LS reads, joined and looping HS paths and CP0 patch "
+          "stores must reflect the layout");
 
   auto ls = CompileTessellationStage(name, local, ShaderType::Local, tess);
   auto hs = CompileTessellationStage(name, control, ShaderType::TessellationControl, tess);
@@ -43999,6 +44079,10 @@ void CheckTessellationPatchConstants() {
   Require(name, "predicated patch outputs",
           hs.addresses[Attribute::PatchOutput] == std::set<u32>{0x7f10, 0x7f20, 0x7f24, 0x7f28},
           "CP0 mul24 addresses under nested EXEC masks must reach patch constants");
+  Require(name, "control point read-back",
+          hs.addresses[Attribute::ControlOutput] == std::set<u32>{hs_stride + 16, hs_stride + 20} &&
+              hs.assembly.find("OpUDiv %uint %uint_96 %uint_80") != std::string::npos,
+          "CP0 must read CP1's outputs by address instead of its own invocation's");
   Require(name, "patch inputs",
           ds.addresses[Attribute::PatchInput] == std::set<u32>{0x7f20, 0x7f24} &&
               ds.addresses[Attribute::EvaluationInput] ==
@@ -44008,12 +44092,16 @@ void CheckTessellationPatchConstants() {
           HasPatchInterface(hs.assembly, "Output", 2, 5) &&
               HasPatchInterface(ds.assembly, "Input", 2, 5),
           "HS and TES patch variables must share their Location and type");
+  Require(name, "integer partitioning", ds.assembly.find("SpacingEqual") != std::string::npos,
+          "integer partitioning must map to equal spacing");
   std::printf("[host]    %-32s ok\n", name);
 #if KYTY_PLATFORM != KYTY_PLATFORM_WINDOWS
-  ExpectFatal("TessellationDivergentJoin", [&] {
-    ShaderTessellationInputInfo info{.input_control_points = 3, .output_control_points = 3};
-    AnalyzeTessellationPrograms(local, make_control(true), info);
-  });
+  for (const bool carried : {false, true}) {
+    ExpectFatal(carried ? "TessellationLoopCarriedAddress" : "TessellationDivergentJoin", [&] {
+      ShaderTessellationInputInfo info{.input_control_points = 3, .output_control_points = 3};
+      AnalyzeTessellationPrograms(local, make_control(!carried, carried), info);
+    });
+  }
 #endif
 }
 
@@ -44225,6 +44313,50 @@ void CheckEmbeddedFetchVertexOffset() {
             "classified");
   }
   std::printf("[host]    %-32s ok\n", "EmbeddedFetchVertexOffset");
+}
+
+/// Checks disjoint reads and fatal rejection of overlaps for fixed and indexed writes.
+void CheckScalarBufferWriteBindingsContract(VulkanHarness &vulkan,
+                                          const char *executable) {
+  vulkan.CheckScalarBufferWriteBindings(false);
+  vulkan.CheckScalarBufferWriteBindings(false, true);
+  for (const char *selector : {"--scalar-buffer-overlap-death", "--scalar-fixed-overlap-death"}) {
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+    constexpr const char *name = "ScalarBufferWriteBindings";
+    char path[MAX_PATH]{};
+    Require(name, "host", GetModuleFileNameA(nullptr, path, MAX_PATH) != 0,
+            "GetModuleFileName failed");
+    std::string command = std::string("\"") + path + "\" " + selector;
+    std::vector<char> mutable_command(command.begin(), command.end());
+    mutable_command.push_back('\0');
+    STARTUPINFOA startup{sizeof(startup)};
+    PROCESS_INFORMATION process{};
+    Require(name, "host",
+            CreateProcessA(nullptr, mutable_command.data(), nullptr, nullptr,
+                           FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &startup,
+                           &process) != 0,
+            "CreateProcess failed");
+    const DWORD wait = WaitForSingleObject(process.hProcess, 30000);
+    if (wait != WAIT_OBJECT_0) {
+      TerminateProcess(process.hProcess, 0x7f);
+      WaitForSingleObject(process.hProcess, 10000);
+    }
+    DWORD exit_code = 0;
+    const bool exited = GetExitCodeProcess(process.hProcess, &exit_code) != 0;
+    CloseHandle(process.hThread);
+    CloseHandle(process.hProcess);
+    Require(name, "fatal overlap guard",
+            wait == WAIT_OBJECT_0 && exited && exit_code == 321,
+            "overlapping scalar read did not retain the fatal guard");
+#else
+    ExpectFatal("ScalarBufferWriteBindings", [executable, selector] {
+      // Re-exec rather than using Vulkan driver state inherited across fork.
+      ::execlp(executable, executable, selector,
+               static_cast<char *>(nullptr));
+      std::_Exit(0x7f);
+    });
+#endif
+  }
 }
 
 [[noreturn]] void RunReverseRenderTargetDeathCase() {
@@ -48899,6 +49031,22 @@ int main(int argc, char **argv) {
   std::setvbuf(stdout, nullptr, _IONBF, 0);
   EnsureConfigInitialized();
   CheckLeastRecentlyUsedCacheOrdering();
+  if (argc == 2 && std::strcmp(argv[1], "--scalar-buffer-overlap-death") == 0) {
+    VulkanHarness vulkan;
+    vulkan.CheckScalarBufferWriteBindings(true);
+    return 0x7f;
+  }
+  if (argc == 2 && std::strcmp(argv[1], "--scalar-fixed-overlap-death") == 0) {
+    VulkanHarness vulkan;
+    vulkan.CheckScalarBufferWriteBindings(true, true);
+    return 0x7f;
+  }
+  if (argc == 2 && std::strcmp(argv[1], "--scalar-buffer-overlap-only") == 0) {
+    VulkanHarness vulkan;
+    CheckScalarBufferWriteBindingsContract(vulkan, argv[0]);
+    return 0;
+  }
+
   if (argc == 2 && std::strcmp(argv[1], "--cvt-pkrtz-only") == 0) {
     VulkanHarness vulkan;
     RunCase(&vulkan, CvtPkrtzF16F32SubnormalRoundsTowardZero());
@@ -49979,6 +50127,7 @@ int main(int argc, char **argv) {
   const bool rasterization = vulkan.RasterizationSupported();
   bool skipped_device_checks = false;
 #endif
+  CheckScalarBufferWriteBindingsContract(vulkan, argv[0]);
   CheckImageSamplerSpecialization();
   CheckResourcePlanHandoff();
   CheckNativeImageDescriptorTypes();
