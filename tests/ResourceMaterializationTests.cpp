@@ -678,6 +678,29 @@ void TestSharedControlPredicates() {
       program.blocks[i]->terminator.true_block = program.blocks[i == 0 ? 1 : 3];
       program.blocks[i]->terminator.false_block = program.blocks[2];
     }
+    // This test exercises predicate sharing needed to decide a resource access.
+    // Keep the CFG predecessor lists in sync with the terminators.
+    program.blocks[0]->AddBranch(program.blocks[1]);
+    program.blocks[0]->AddBranch(program.blocks[2]);
+    program.blocks[1]->AddBranch(program.blocks[3]);
+    program.blocks[1]->AddBranch(program.blocks[2]);
+
+    MemoryInfo memory;
+    memory.kind = ResourceKind::Buffer;
+    memory.resource = 0;
+    program.memory_info.push_back(memory);
+    DescriptorSource descriptor;
+    descriptor.dwords = {Value(0x8000u), Value(1u << 16u), Value(16u), Value(3u << 28u)};
+    descriptor.dword_count = 4;
+    program.descriptor_sources.push_back(descriptor);
+    program.info.buffers.push_back({.source = 0});
+    auto &use = *program.blocks[3];
+    auto &handle = use.AppendNewInst(ValueOpcode::GetBufferResource,
+        {descriptor.dwords[0], descriptor.dwords[1], descriptor.dwords[2], descriptor.dwords[3]});
+    use.AppendNewInst(ValueOpcode::LoadBufferU32,
+        {Value(&handle), Value(0u), Value(0u), Value(0u), Value(true)})
+        .SetFlags(MemoryFlags{.index = 0});
+
     auto plan = ExtractResourcePlan(program);
     Check(plan.value_storage.size() <= 2u * depth + 12u &&
               plan.control_flow.size() == 4 &&
@@ -696,9 +719,9 @@ void TestSharedControlPredicates() {
       std::vector<uint32_t> flat;
       Check(walker.RefreshFlatBuffer(flat) &&
                 plan.visited_blocks == (known
-                    ? (conjunction ? std::vector<uint8_t>{1, 1, 0, 1}
-                                   : std::vector<uint8_t>{1, 0, 1, 0})
-                    : std::vector<uint8_t>{1, 1, 1, 1}),
+                    ? (conjunction ? std::vector<uint8_t>{2, 2, 0, 2}
+                                   : std::vector<uint8_t>{2, 0, 2, 0})
+                    : std::vector<uint8_t>{2, 1, 1, 1}),
             "shared predicate skipped an unknown branch or followed a rejected branch");
     }
   }

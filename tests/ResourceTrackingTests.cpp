@@ -5802,9 +5802,9 @@ void TestScalarDataReadControlFlow() {
         {address, Value(0u), Value(0u), Value(true)}, fixture.AddMemory(scalar, 4), use);
     fixture.PlanAndTrack();
     auto plan = ExtractResourcePlan(fixture.program);
-    Check(plan.srt_reads.size() == 1 && !fixture.program.info.uses_dma &&
-              bool(plan.srt_code) == (comparison == ValueOpcode::Void),
-          "scalar data lost flattening or conditional reads entered the unconditional JIT");
+    Check(plan.srt_reads.empty() && plan.gpu_scalar_reads.size() == 1 &&
+              plan.control_flow.empty() && !fixture.program.info.uses_dma && !plan.srt_code,
+          "scalar payload was snapshotted instead of remaining a GPU-side scalar read");
     uint32_t reads = 0;
     std::array<uint32_t, 2> user_data {};
     SrtRuntime runtime {.user_data = user_data,
@@ -5820,9 +5820,11 @@ void TestScalarDataReadControlFlow() {
       if (pointer == 0 && comparison == ValueOpcode::Void) continue;
       user_data = {static_cast<uint32_t>(pointer), static_cast<uint32_t>(pointer >> 32u)};
       reads = 0;
-      Check(MaterializeResources(plan, runtime, snapshot, specialization) &&
-                reads == (pointer != 0) && snapshot.flattened_srt[0] == (pointer ? 42u : 0u),
-            "scalar data refresh ignored a mixed EXEC/64-bit null-pointer branch");
+      Check(MaterializeResources(plan, runtime, snapshot, specialization) && reads == 0 &&
+                snapshot.flattened_srt.empty() &&
+                snapshot.gpu_scalar_reads ==
+                    std::vector<std::pair<uint64_t, uint64_t>>{{pointer, sizeof(uint32_t)}},
+            "scalar data refresh captured payload bytes instead of reporting GPU read residency");
     }
   }
 }
