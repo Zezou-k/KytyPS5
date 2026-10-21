@@ -248,7 +248,9 @@ uint32_t EmitF32ToF16RneBits(EmitterState& state, uint32_t f32) {
 	const auto exp_le_112 =
 	    EmitCompareU32Constant(state, spv::OpULessThanEqual, exponent, 112);
 	const auto exp_lt_103 = EmitCompareU32Constant(state, spv::OpULessThan, exponent, 103);
-	const auto raw_sub_shift = EmitSubConstantMinusU32(state, 126, exponent);
+	const auto raw_sub_shift =
+    	Binary(state, spv::OpISub, TypeU32(state),
+           		ConstantU32(state, 126), exponent);
 	const auto sub_shift =
 	    EmitSelectValueU32(state, exp_le_112, raw_sub_shift, ConstantU32(state, 14));
 	const auto step = state.builder.AllocateId();
