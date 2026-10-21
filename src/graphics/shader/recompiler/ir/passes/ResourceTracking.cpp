@@ -3981,11 +3981,17 @@ private:
 				return;
 			}
 			ValidateAddressHandle(inst.Arg(0), flags.pc);
-			// Scalar-address DWORD loads remain GPU-side reads.
-			// Their residency is tracked separately; do not classify them as DMA.
-			if (memory.kind == ResourceKind::ScalarAddress &&
-    			op == ValueOpcode::LoadAddressU32) {
-   			 	return;
+			// Only fixed-offset scalar DWORD loads use the GPU scalar-read
+			// residency plan. Dynamic scalar reads must remain on the DMA path.
+			if (op == ValueOpcode::LoadAddressU32) {
+    			uint32_t scalar_read_index = 0;
+    			const auto scalar_offset = inst.Arg(1).Resolve();
+
+    			if (ScalarReadMemory(inst, scalar_read_index) != nullptr &&
+        			scalar_offset.IsImmediate() &&
+        			scalar_offset.GetType() == Type::U32) {
+        			return;
+    			}
 			}
 			if (address_info.access == AddressAccess::Write) {
 				m_program.has_address_writes = true;
