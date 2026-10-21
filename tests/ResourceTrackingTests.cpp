@@ -8443,10 +8443,18 @@ void TestSingleSuccessorKeepsCertainty() {
   entry->AddBranch(optional);
   entry->AddBranch(done);
   optional->AddBranch(done);
-  fixture.program.block_info[0].terminator = {
-      .kind = CFG::TerminatorKind::ConditionalBranch, .true_block = 1, .false_block = 2};
-  fixture.program.block_info[1].terminator = {.kind = CFG::TerminatorKind::Branch, .true_block = 2};
-  fixture.program.block_info[2].terminator.kind = CFG::TerminatorKind::Return;
+  entry->terminator = {
+      .kind = CFG::TerminatorKind::ConditionalBranch,
+      .true_block = optional,
+      .false_block = done
+  };
+
+  optional->terminator = {
+      .kind = CFG::TerminatorKind::Branch,
+      .true_block = done
+  };
+
+  done->terminator.kind = CFG::TerminatorKind::Return;
   const auto control = fixture.Buffer({fixture.UserData(0), fixture.UserData(1),
                                       fixture.UserData(2), fixture.UserData(3)});
   MemoryInfo scalar;
@@ -8455,7 +8463,7 @@ void TestSingleSuccessorKeepsCertainty() {
   const auto flag = fixture.Emit(ValueOpcode::ReadConstBuffer, {control, Value(0u)},
                                  fixture.AddMemory(scalar, 4));
   // The condition comes from memory, so the walker decides it and `optional` is certain to run.
-  fixture.program.block_info[0].condition = fixture.Emit(ValueOpcode::INotEqual32, {flag, Value(0u)});
+  entry->condition = fixture.Emit(ValueOpcode::INotEqual32, {flag, Value(0u)});
   fixture.block = done;
   const auto root = fixture.Address(fixture.UserData(4), Value(0u));
   MemoryInfo address;
