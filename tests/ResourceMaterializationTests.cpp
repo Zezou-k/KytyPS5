@@ -149,6 +149,29 @@ Libs::Graphics::ShaderRecompiler::IR::Program MixedSamplerProgram() {
   return program;
 }
 
+void TestMappedSrtUsesDirectReaderByDefault() {
+  using namespace Libs::Graphics::ShaderRecompiler::IR;
+
+  const std::array<uint32_t, 1> mapped{0x12345678u};
+  const auto address = reinterpret_cast<uint64_t>(mapped.data());
+
+  auto program = SrtProgram(address);
+  auto plan = ExtractResourcePlan(program);
+
+  std::vector<std::pair<uint64_t, uint64_t>> ranges;
+  SrtReadCapture capture(SrtRuntime{}, ranges);
+  const auto runtime = capture.ObservedRuntime();
+
+  SrtWalker walker(plan, runtime);
+  uint32_t value = 0;
+
+  Check(walker.Evaluate(plan.srt_reads[0].value, value) &&
+            value == mapped[0] &&
+            ranges == std::vector<std::pair<uint64_t, uint64_t>>{
+                          {address, sizeof(uint32_t)}},
+        "mapped SRT read did not use the direct reader by default");
+}
+
 // Without an ordinary reader the walker reads through the checked reader and never dereferences
 // the guest address itself, so a table the guest never set cannot fault the host.
 void TestNativeNestedSrtRefresh() {
