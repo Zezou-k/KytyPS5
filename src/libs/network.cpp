@@ -2619,7 +2619,7 @@ int64_t KYTY_SYSV_ABI Recvfrom(int s, void* buf, uint64_t len, int flags, void* 
 	// Winsock rejects MSG_PEEK | MSG_WAITALL with WSAEOPNOTSUPP on datagram sockets, while a
 	// datagram is delivered whole anyway; only stream receives keep the combined flag.
 	const int recv_flags =
-	    transport->type == SOCK_STREAM ? host_flags : (host_flags & ~MSG_WAITALL);
+	    state.transport->type == SOCK_STREAM ? host_flags : (host_flags & ~MSG_WAITALL);
 #if defined(_WIN32)
 	if (state.transport->type == SOCK_STREAM) {
 		if (addr != nullptr &&
