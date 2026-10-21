@@ -399,6 +399,28 @@ jobs:
           ctest --test-dir _Build/linux --output-on-failure \
             -R '^(audio_out2_port|pad_haptics|controller_settings|host_input|ime_dialog|lru_cache|memory_tracker|page_manager|resource_tracking|scalar_provenance|resource_materialization|shader_vertex_metadata|archive_file|avplayer_file|virtual_memory_allocation)$'
 
+      - name: Capture shader resource crash backtraces
+        if: failure()
+        shell: bash
+        run: |
+          if ! command -v gdb >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install --yes gdb
+          fi
+
+          for target in \
+            resource_materialization_tests \
+            resource_tracking_tests
+          do
+            echo "========== Backtrace: ${target} =========="
+
+            gdb -q -batch \
+              -ex 'set pagination off' \
+              -ex run \
+              -ex 'thread apply all bt full' \
+              --args "_Build/linux/${target}" || true
+          done
+
       - name: Install
         shell: bash
         run: |
