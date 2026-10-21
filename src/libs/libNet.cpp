@@ -1960,30 +1960,6 @@ static int KYTY_SYSV_ABI NpEntitlementAccessRequestUnifiedEntitlementInfoList() 
 	return EntitlementOfflineNoEntitlement();
 }
 
-LIB_DEFINE(InitNet_1_NpEntitlementAccess) {
-	LIB_FUNC("jO8DM8oyego", LibNpEntitlementAccess::NpEntitlementAccessInitialize);
-	LIB_FUNC("lPDO62PpJIA", LibNpEntitlementAccess::NpEntitlementAccessGetSkuFlag);
-	LIB_FUNC("TFyU+KFBv54",
-	         LibNpEntitlementAccess::NpEntitlementAccessGetAddcontEntitlementInfoList);
-	LIB_FUNC("xddD23+8TfQ", LibNpEntitlementAccess::NpEntitlementAccessGetAddcontEntitlementInfo);
-	LIB_FUNC("5LiMEPuW0DQ", LibNpEntitlementAccess::NpEntitlementAccessGetEntitlementKey);
-	// The plugin's request/poll surface, all offline-neutral.
-	LIB_FUNC("69u+XqsoNd0", NpEntitlementAccessPollConsumeEntitlement);
-	LIB_FUNC("Aqae0TjLvQU", NpEntitlementAccessRequestConsumeServiceEntitlement);
-	LIB_FUNC("HFcQl9TMcFQ", NpEntitlementAccessAbortRequest);
-	LIB_FUNC("IQtb-TaIjSM", NpEntitlementAccessGenerateTransactionId);
-	LIB_FUNC("M4XlLFnzQaQ", NpEntitlementAccessPollUnifiedEntitlementInfo);
-	LIB_FUNC("M8icY9OwkKs", NpEntitlementAccessRequestServiceEntitlementInfo);
-	LIB_FUNC("ShGBFuoSSsQ", NpEntitlementAccessPollServiceEntitlementInfo);
-	LIB_FUNC("Z0eQj8m7XA8", NpEntitlementAccessDeleteRequest);
-	LIB_FUNC("aFv8qms6XTM", NpEntitlementAccessPollServiceEntitlementInfoList);
-	LIB_FUNC("brbRxzr7qyI", NpEntitlementAccessRequestServiceEntitlementInfoList);
-	LIB_FUNC("eOxGbG3sPb0", NpEntitlementAccessRequestConsumeUnifiedEntitlement);
-	LIB_FUNC("jautSRs4OdQ", NpEntitlementAccessRequestUnifiedEntitlementInfo);
-	LIB_FUNC("nAEqawEZG5s", NpEntitlementAccessPollUnifiedEntitlementInfoList);
-	LIB_FUNC("uCZf2L27th8", NpEntitlementAccessRequestUnifiedEntitlementInfoList);
-}
-
 } // namespace LibNpEntitlementAccess
 
 namespace LibNpAuth {
