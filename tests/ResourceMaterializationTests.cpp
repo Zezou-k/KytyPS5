@@ -1079,6 +1079,42 @@ void TestCyclicControlPredicatesRemainUnknown() {
   branch(entry, u, left, right);
   branch(left, a, right, exit);
   branch(right, b, left, exit);
+  
+  // Make the cyclic CFG relevant to resource selection.
+  // Without a resource access, ExtractResourcePlan may discard the CFG.
+  MemoryInfo memory;
+  memory.kind = ResourceKind::Buffer;
+  memory.resource = 0;
+  program.memory_info.push_back(memory);
+
+  DescriptorSource descriptor;
+  descriptor.dwords = {
+      Value(0x8000u),
+      Value(1u << 16u),
+      Value(16u),
+      Value(3u << 28u)
+  };
+  descriptor.dword_count = 4;
+  program.descriptor_sources.push_back(descriptor);
+
+  program.info.buffers.push_back({.source = 0});
+
+  auto& handle = exit.AppendNewInst(
+      ValueOpcode::GetBufferResource,
+      {descriptor.dwords[0],
+      descriptor.dwords[1],
+      descriptor.dwords[2],
+      descriptor.dwords[3]});
+
+  exit.AppendNewInst(
+      ValueOpcode::LoadBufferU32,
+      {Value(&handle),
+      Value(0u),
+      Value(0u),
+      Value(0u),
+      Value(true)})
+      .SetFlags(MemoryFlags{.index = 0});
+
   auto plan = ExtractResourcePlan(program);
   SrtWalker walker(plan, {});
   uint32_t value = 99;
