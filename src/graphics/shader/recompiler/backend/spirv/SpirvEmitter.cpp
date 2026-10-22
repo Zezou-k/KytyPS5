@@ -36,6 +36,20 @@ void ValidateNativeProgram(const IR::Program& program, bool lds_storage) {
 		const auto index = use.user->Flags<IR::MemoryFlags>().index;
 		return index < program.memory_info.size() && program.memory_info[index].planning_only;
 	};
+	const auto fixed_scalar_address_read_use = [&](const IR::Use& use) {
+		const auto* read = use.user;
+		if (read->GetOpcode() != IR::ValueOpcode::LoadAddressU32 || read->NumArgs() != 4u) {
+			return false;
+		}
+		const auto index = read->Flags<IR::MemoryFlags>().index;
+		if (index >= program.memory_info.size()) {
+			return false;
+		}
+		const auto& memory = program.memory_info[index];
+		const auto offset = read->Arg(1).Resolve();
+		return memory.kind == IR::ResourceKind::ScalarAddress && memory.data_bits == 32u &&
+		       memory.data_dwords == 1u && offset.IsImmediate() && offset.GetType() == IR::Type::U32;
+	};
 	const auto planning_only_handle = [&](const IR::Inst& handle) {
 		return !handle.Uses().empty() &&
 		       std::ranges::all_of(handle.Uses(), planning_only_use);
@@ -55,7 +69,8 @@ void ValidateNativeProgram(const IR::Program& program, bool lds_storage) {
 		return !handle.Uses().empty() &&
 		       std::ranges::all_of(handle.Uses(), [&](const IR::Use& use) {
 			       // A shared handle may also feed reads consumed only by the resource planner.
-			       if (planning_only_use(use)) return true;
+			       // Fixed-offset scalar address reads use shader-data residency, not DMA.
+			       if (planning_only_use(use) || fixed_scalar_address_read_use(use)) return true;
 			       if (IR::AddressOpcodeInfoOf(use.user->GetOpcode()).access == IR::AddressAccess::None)
 				       return false;
 			       const auto index = use.user->Flags<IR::MemoryFlags>().index;
