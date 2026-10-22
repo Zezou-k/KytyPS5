@@ -20,12 +20,6 @@ int main(int argc, char* argv[]) {
 	QApplication::setWindowIcon(icon);
 	LauncherTheme::Initialize(a);
 
-	// Read the skip-splash preference directly from Kyty.ini ([Launcher]/skip_boot_splash).
-	if (QFile::exists(QStringLiteral("Kyty.ini"))) {
-		QSettings settings(QStringLiteral("Kyty.ini"), QSettings::IniFormat);
-		MainDialog::SetSkipBootSplash(settings.value("Launcher/skip_boot_splash", false).toBool());
-	}
-
 	auto* splash = new BootSplash;
 
 	if (splash != nullptr && !MainDialog::SkipBootSplash()) {
