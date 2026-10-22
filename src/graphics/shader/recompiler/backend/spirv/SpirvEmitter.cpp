@@ -235,9 +235,6 @@ std::vector<uint32_t> EmitProgram(IR::Program& program, ShaderStageInputInfo inp
 	    !program.shader_info_complete) {
 		Fail(program, "SPIR-V emitter requires a fully planned native shader program");
 	}
-	if (validation_enabled) {
-		IR::ValidateProgram(program, true);
-	}
 	program.bindings = {.push_data_start_dword = push_data_start_dword};
 	EmitterState state(program, input_info, profile);
 	if (emit_debug_info) {
@@ -252,10 +249,6 @@ std::vector<uint32_t> EmitProgram(IR::Program& program, ShaderStageInputInfo inp
 	        ? 2u
 	        : 1u;
 	DefineModule(state);
-	if (validation_enabled) {
-		ValidateNativeProgram(program,
-		                      program.stage == ShaderType::Compute && input_info.compute->lds_storage);
-	}
 	EmitProgram(state);
 	state.builder.AddEntryPoint(ExecutionModelForStage(state.program.stage), state.main_func,
 	                            "main", state.interface_variables);
