@@ -76,7 +76,8 @@ static void PrintUsage() {
 	::printf("  --network-connected                  Use the host local network.\n");
 	::printf("  --gpu-assisted-validation            Bounds-check shader accesses on the GPU.\n"
 	         "                                       Implies --vulkan-validation; very slow.\n");
-	::printf("  --shader-validation                  Enable shader validation.\n");
+	::printf("  --shader-validation                  Enable SPIRV-Tools binary validation.\n");
+	::printf("  --spirvv                             Enable SPIR-V emitter and binary validation.\n");
 	::printf("  --tessellation                      Draw tessellation patches; skipped by default.\n");
 	::printf("  --shader-optimization-type <value>   None, Size, or Performance.\n");
 	::printf("  --shader-log-direction <value>       Silent, Console, or File.\n");
@@ -225,6 +226,12 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 
 		if (arg == "--help" || arg == "-h") {
 			show_help = true;
+			continue;
+		}
+
+		if (arg == "--spirvv") {
+			options.config.spirv_validation_enabled = true;
+			options.config.shader_validation_enabled = true;
 			continue;
 		}
 

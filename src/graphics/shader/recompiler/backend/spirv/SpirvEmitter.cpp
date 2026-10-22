@@ -27,18 +27,18 @@ void ValidateNativeProgram(const IR::Program& program, bool lds_storage) {
 	};
 	bool uses_flattened_srt = std::ranges::any_of(program.info.buffers, uses_mapping) ||
 	                          std::ranges::any_of(program.info.images, uses_mapping);
+	const auto planning_only_use = [&](const IR::Use& use) {
+		const auto op = use.user->GetOpcode();
+		if (op != IR::ValueOpcode::LoadAddressU32 &&
+		    op != IR::ValueOpcode::ReadConstBuffer) {
+			return false;
+		}
+		const auto index = use.user->Flags<IR::MemoryFlags>().index;
+		return index < program.memory_info.size() && program.memory_info[index].planning_only;
+	};
 	const auto planning_only_handle = [&](const IR::Inst& handle) {
 		return !handle.Uses().empty() &&
-		       std::ranges::all_of(handle.Uses(), [&](const IR::Use& use) {
-			       const auto op = use.user->GetOpcode();
-			       if (op != IR::ValueOpcode::LoadAddressU32 &&
-			           op != IR::ValueOpcode::ReadConstBuffer) {
-				       return false;
-			       }
-			       const auto index = use.user->Flags<IR::MemoryFlags>().index;
-			       return index < program.memory_info.size() &&
-			              program.memory_info[index].planning_only;
-		       });
+		       std::ranges::all_of(handle.Uses(), planning_only_use);
 	};
 	const auto indirect_buffer_handle = [&](const IR::Inst& handle) {
 		return program.info.uses_dma && handle.NumArgs() == 4u && !handle.Uses().empty() &&
@@ -54,6 +54,8 @@ void ValidateNativeProgram(const IR::Program& program, bool lds_storage) {
 	const auto local_flat_handle = [&](const IR::Inst& handle) {
 		return !handle.Uses().empty() &&
 		       std::ranges::all_of(handle.Uses(), [&](const IR::Use& use) {
+			       // A shared handle may also feed reads consumed only by the resource planner.
+			       if (planning_only_use(use)) return true;
 			       if (IR::AddressOpcodeInfoOf(use.user->GetOpcode()).access == IR::AddressAccess::None)
 				       return false;
 			       const auto index = use.user->Flags<IR::MemoryFlags>().index;
@@ -205,7 +207,7 @@ void ValidateNativeProgram(const IR::Program& program, bool lds_storage) {
 
 std::vector<uint32_t> EmitProgram(IR::Program& program, ShaderStageInputInfo input_info,
                                   uint32_t push_data_start_dword, bool maintenance8_enabled,
-                                  bool emit_debug_info) {
+                                  bool emit_debug_info, bool validation_enabled) {
 	using namespace Emitter;
 
 	if (program.stage != ShaderType::Compute && program.stage != ShaderType::Vertex &&
@@ -218,7 +220,9 @@ std::vector<uint32_t> EmitProgram(IR::Program& program, ShaderStageInputInfo inp
 	    !program.shader_info_complete) {
 		Fail(program, "SPIR-V emitter requires a fully planned native shader program");
 	}
-	IR::ValidateProgram(program, true);
+	if (validation_enabled) {
+		IR::ValidateProgram(program, true);
+	}
 	program.bindings = {.push_data_start_dword = push_data_start_dword};
 	EmitterState state(program, input_info, maintenance8_enabled);
 	if (emit_debug_info) {
@@ -233,8 +237,10 @@ std::vector<uint32_t> EmitProgram(IR::Program& program, ShaderStageInputInfo inp
 	        ? 2u
 	        : 1u;
 	DefineModule(state);
-	ValidateNativeProgram(program,
-	                      program.stage == ShaderType::Compute && input_info.compute->lds_storage);
+	if (validation_enabled) {
+		ValidateNativeProgram(program,
+		                      program.stage == ShaderType::Compute && input_info.compute->lds_storage);
+	}
 	EmitProgram(state);
 	state.builder.AddEntryPoint(ExecutionModelForStage(state.program.stage), state.main_func,
 	                            "main", state.interface_variables);

@@ -28,6 +28,7 @@ struct CompileOptions {
 	std::span<const uint32_t>   user_data;
 	std::span<const uint32_t>   back_code;
 	ShaderStageInputInfo        input_info;
+	bool                        spirv_validation_enabled = false;
 };
 
 struct TranslateResult {
